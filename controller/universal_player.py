@@ -304,7 +304,7 @@ class UniversalPlayer:
             send_tap(self.serial, frame.x, frame.y)
 
     def _exec_gesture(self, frame: Frame) -> None:
-        """Execute a gesture (tap/swipe/long_press)."""
+        """Execute a gesture (tap/swipe/long_press/two_finger_tap)."""
         if frame.action == "tap":
             # If we have element info and it has resource_id/text, try element-based tap
             if frame.element and (frame.element.get("resource_id") or frame.element.get("text")):
@@ -335,6 +335,11 @@ class UniversalPlayer:
             self.log(f"  Long press ({frame.x}, {frame.y}) {frame.duration_ms}ms", "STEP")
             dur = max(500, int(frame.duration_ms / self.speed))
             send_swipe(self.serial, frame.x, frame.y, frame.x, frame.y, dur)
+
+        elif frame.action == "two_finger_tap":
+            self.log(f"  Two-finger tap ({frame.x}, {frame.y})", "STEP")
+            # For playback, execute as a regular tap
+            send_tap(self.serial, frame.x, frame.y)
 
     def _exec_element(self, frame: Frame) -> None:
         """Execute element-based tap with smart lookup."""

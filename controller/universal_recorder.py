@@ -53,6 +53,7 @@ EVENT_PATTERN = re.compile(
     r"\[\s*(\d+\.\d+)\]\s+(\S+):\s+(\S+)\s+(\S+)\s+([0-9a-fA-F]+)"
 )
 POSITION_CODES = {"ABS_MT_POSITION_X", "ABS_MT_POSITION_Y"}
+MULTITOUCH_CODES = {"ABS_MT_SLOT", "ABS_MT_TRACKING_ID"}
 
 # Common Android key codes mapping (from getevent to Android keycode)
 # Reference: https://source.android.com/devices/input/keyboard-devices
@@ -105,6 +106,11 @@ class UniversalRecorder:
         self._touch_active = False
         self._gesture_buffer: List[Frame] = []
         self._pending_key_code: Optional[str] = None  # Track key down events
+
+        # Multi-touch tracking
+        self._current_slot: int = 0
+        self._active_slots: Dict[int, Dict[str, Any]] = {}  # slot -> {x, y, tracking_id}
+        self._gesture_start_slot_count: int = 0  # Number of fingers when gesture started
 
     # ---------- Setup ----------
 
@@ -299,6 +305,54 @@ class UniversalRecorder:
         except Exception as e:
             print(f"\n⚠️  Error displaying elements: {e}\n")
 
+    def _display_elements_as_grid(self) -> None:
+        """Display all UI elements on screen in a visual grid frame format."""
+        try:
+            print("\n" + "="*100)
+            print("╔" + "═"*98 + "╗")
+            print("║" + " "*34 + "📱 SCREEN TEXT ELEMENTS (GRID VIEW)" + " "*32 + "║")
+            print("╚" + "═"*98 + "╝")
+
+            xml = get_ui_xml(self.serial)
+            elements = parse_all_elements(xml)
+
+            if not elements:
+                print("⚠️  No elements found on screen")
+                print("="*100 + "\n")
+                return
+
+            # Filter elements with text content
+            text_elements = [el for el in elements if el.text and el.text.strip()]
+
+            if not text_elements:
+                print("⚠️  No elements with text content found")
+                print("="*100 + "\n")
+                return
+
+            # Sort by vertical position, then horizontal
+            text_elements.sort(key=lambda e: (e.center[1], e.center[0]))
+
+            # Display in grid format
+            for idx, el in enumerate(text_elements, 1):
+                x1, y1, x2, y2 = el.bounds
+                width = x2 - x1
+                height = y2 - y1
+
+                # Create element box
+                print("┌" + "─" * 94 + "┐")
+                print(f"│ [{idx:2d}] {el.text[:90]:90s} │")
+                print(f"│      ID: {el.resource_id[:86]:86s} │")
+                print(f"│      Bounds: [{x1:4d}, {y1:4d}] - [{x2:4d}, {y2:4d}] | Size: {width:4d}x{height:4d} px │")
+                print(f"│      Class: {el.cls.split('.')[-1]:90s} │")
+                print("└" + "─" * 94 + "┘")
+
+            print("\n" + "="*100)
+            print(f"✅ Total: {len(text_elements)} text elements displayed")
+            print("="*100 + "\n")
+
+        except Exception as e:
+            print(f"\n⚠️  Error displaying grid: {e}\n")
+
     def _ms_since_start(self) -> int:
         return int((time.time() - self._start_time) * 1000)
 
@@ -421,13 +475,34 @@ class UniversalRecorder:
 
             timestamp_raw, device, ev_type, code, value_hex = match.groups()
 
+            # Handle multi-touch slot and tracking ID
+            if ev_type == "EV_ABS" and code in MULTITOUCH_CODES:
+                value = int(value_hex, 16)
+                if code == "ABS_MT_SLOT":
+                    self._current_slot = value
+                elif code == "ABS_MT_TRACKING_ID":
+                    if value == 0xFFFFFFFF:  # -1 in signed 32-bit, means finger lifted
+                        if self._current_slot in self._active_slots:
+                            del self._active_slots[self._current_slot]
+                    else:
+                        if self._current_slot not in self._active_slots:
+                            self._active_slots[self._current_slot] = {}
+                        self._active_slots[self._current_slot]["tracking_id"] = value
+                continue
+
             # Handle touch events
             if ev_type == "EV_ABS" and code in POSITION_CODES:
                 value = int(value_hex, 16)
                 if code == "ABS_MT_POSITION_X":
                     self._last_x = value
+                    if self._current_slot not in self._active_slots:
+                        self._active_slots[self._current_slot] = {}
+                    self._active_slots[self._current_slot]["x"] = value
                 else:
                     self._last_y = value
+                    if self._current_slot not in self._active_slots:
+                        self._active_slots[self._current_slot] = {}
+                    self._active_slots[self._current_slot]["y"] = value
                 pending_update = True
                 continue
 
@@ -459,6 +534,7 @@ class UniversalRecorder:
                     if not self._touch_active:
                         action = "down"
                         self._touch_active = True
+                        self._gesture_start_slot_count = len(self._active_slots)
                     else:
                         action = "move"
 
@@ -511,7 +587,13 @@ class UniversalRecorder:
         dist = abs(end.x - start.x) + abs(end.y - start.y)
         dur = end.t - start.t
 
-        if dist < 30 and dur < 500:
+        # Determine gesture type
+        # Check for two-finger tap: started with 2+ fingers and small movement
+        is_two_finger_tap = self._gesture_start_slot_count >= 2 and dist < 30 and dur < 500
+
+        if is_two_finger_tap:
+            gesture_type = "two_finger_tap"
+        elif dist < 30 and dur < 500:
             gesture_type = "tap"
         elif dist < 30:
             gesture_type = "long_press"
@@ -522,27 +604,34 @@ class UniversalRecorder:
         element_info = None
         unix_ts = int(time.time())
 
-        if self.auto_annotate and gesture_type in ("tap", "long_press"):
-            element_info = self._annotate_point(start.x, start.y)
-            if element_info:
-                rid = element_info.get("resource_id", "")
-                txt = element_info.get("text", "")
-                label = txt or (rid.split("/")[-1] if rid else "")
+        if self.auto_annotate:
+            if gesture_type in ("tap", "long_press", "two_finger_tap"):
+                element_info = self._annotate_point(start.x, start.y) if gesture_type != "two_finger_tap" else None
 
-                # For long_press, show ALL elements on screen categorized by type
-                if gesture_type == "long_press":
-                    print(f"  → {gesture_type} on [{label}] at ({start.x}, {start.y})  [ts:{unix_ts}]")
+                if gesture_type == "two_finger_tap":
+                    print(f"  → {gesture_type} at ({start.x}, {start.y})  [ts:{unix_ts}]")
+                    # Display all elements in grid format for two-finger tap
+                    self._display_elements_as_grid()
+                elif gesture_type == "long_press":
+                    if element_info:
+                        rid = element_info.get("resource_id", "")
+                        txt = element_info.get("text", "")
+                        label = txt or (rid.split("/")[-1] if rid else "")
+                        print(f"  → {gesture_type} on [{label}] at ({start.x}, {start.y})  [ts:{unix_ts}]")
+                    else:
+                        print(f"  → {gesture_type} at ({start.x}, {start.y}) (no element)  [ts:{unix_ts}]")
                     # Display all elements on screen, categorized by type
                     self._display_all_elements_categorized()
-                else:
-                    print(f"  → {gesture_type} on [{label}]  [ts:{unix_ts}]")
-            else:
-                print(f"  → {gesture_type} at ({start.x}, {start.y}) (no element)  [ts:{unix_ts}]")
-                # Still show all elements even if no specific element was found
-                if gesture_type == "long_press":
-                    self._display_all_elements_categorized()
-        elif gesture_type == "swipe":
-            print(f"  → swipe ({start.x},{start.y}) → ({end.x},{end.y}) {dur}ms  [ts:{unix_ts}]")
+                else:  # tap
+                    if element_info:
+                        rid = element_info.get("resource_id", "")
+                        txt = element_info.get("text", "")
+                        label = txt or (rid.split("/")[-1] if rid else "")
+                        print(f"  → {gesture_type} on [{label}]  [ts:{unix_ts}]")
+                    else:
+                        print(f"  → {gesture_type} at ({start.x}, {start.y}) (no element)  [ts:{unix_ts}]")
+            elif gesture_type == "swipe":
+                print(f"  → swipe ({start.x},{start.y}) → ({end.x},{end.y}) {dur}ms  [ts:{unix_ts}]")
 
         # Add gesture summary frame
         gesture_frame = Frame(
@@ -557,6 +646,7 @@ class UniversalRecorder:
         )
         self._add_frame(gesture_frame)
         self._gesture_buffer.clear()
+        self._gesture_start_slot_count = 0
 
     # ---------- Annotated (Interactive) Recording ----------
 
