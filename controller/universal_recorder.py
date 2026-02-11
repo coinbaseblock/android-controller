@@ -228,6 +228,77 @@ class UniversalRecorder:
         except Exception:
             return set()
 
+    def _display_all_elements_categorized(self) -> None:
+        """Display all UI elements on screen, categorized by element type."""
+        try:
+            print("\n" + "="*80)
+            print("🔍 ALL SCREEN ELEMENTS (Categorized by Type)")
+            print("="*80)
+
+            xml = get_ui_xml(self.serial)
+            elements = parse_all_elements(xml)
+
+            if not elements:
+                print("⚠️  No elements found on screen")
+                print("="*80 + "\n")
+                return
+
+            # Categorize elements by class type
+            categories: Dict[str, List[ElementInfo]] = {}
+            for el in elements:
+                # Skip elements without useful information
+                if not el.text and not el.resource_id and not el.clickable:
+                    continue
+
+                # Simplify class name (remove package prefix)
+                class_name = el.cls.split(".")[-1] if el.cls else "Unknown"
+                if class_name not in categories:
+                    categories[class_name] = []
+                categories[class_name].append(el)
+
+            if not categories:
+                print("⚠️  No meaningful elements found (no text, resource_id, or clickable elements)")
+                print("="*80 + "\n")
+                return
+
+            # Display each category
+            total_elements = 0
+            for class_name in sorted(categories.keys()):
+                element_list = categories[class_name]
+                print(f"\n📌 {class_name} ({len(element_list)} elements)")
+                print("-" * 80)
+
+                for idx, el in enumerate(element_list, 1):
+                    total_elements += 1
+
+                    # Build element description
+                    parts = []
+                    if el.text:
+                        parts.append(f'text="{el.text}"')
+                    if el.resource_id:
+                        # Show only the last part of resource_id for readability
+                        short_id = el.resource_id.split("/")[-1] if "/" in el.resource_id else el.resource_id
+                        parts.append(f'id="{short_id}"')
+                    if el.clickable:
+                        parts.append("clickable")
+                    if not el.enabled:
+                        parts.append("disabled")
+
+                    # Format bounds
+                    bounds_str = f"[{el.bounds[0]},{el.bounds[1]}]-[{el.bounds[2]},{el.bounds[3]}]"
+
+                    # Print element info
+                    info = ", ".join(parts) if parts else "no text/id"
+                    print(f"  {idx:2d}. {info}")
+                    print(f"      bounds: {bounds_str} | center: ({el.center[0]}, {el.center[1]})")
+
+            print("\n" + "="*80)
+            print(f"✅ Total: {total_elements} elements across {len(categories)} categories")
+            print("="*80 + "\n")
+
+        except Exception as e:
+            print(f"\n⚠️  Error displaying elements: {e}\n")
+
     def _ms_since_start(self) -> int:
         return int((time.time() - self._start_time) * 1000)
 
@@ -458,18 +529,18 @@ class UniversalRecorder:
                 txt = element_info.get("text", "")
                 label = txt or (rid.split("/")[-1] if rid else "")
 
-                # For long_press, show all text content
+                # For long_press, show ALL elements on screen categorized by type
                 if gesture_type == "long_press":
-                    all_texts = self._get_all_text_at_point(start.x, start.y)
-                    if all_texts:
-                        texts_display = ", ".join(f'"{t}"' for t in sorted(all_texts))
-                        print(f"  → {gesture_type} on [{label}] - texts: {texts_display}  [ts:{unix_ts}]")
-                    else:
-                        print(f"  → {gesture_type} on [{label}]  [ts:{unix_ts}]")
+                    print(f"  → {gesture_type} on [{label}] at ({start.x}, {start.y})  [ts:{unix_ts}]")
+                    # Display all elements on screen, categorized by type
+                    self._display_all_elements_categorized()
                 else:
                     print(f"  → {gesture_type} on [{label}]  [ts:{unix_ts}]")
             else:
                 print(f"  → {gesture_type} at ({start.x}, {start.y}) (no element)  [ts:{unix_ts}]")
+                # Still show all elements even if no specific element was found
+                if gesture_type == "long_press":
+                    self._display_all_elements_categorized()
         elif gesture_type == "swipe":
             print(f"  → swipe ({start.x},{start.y}) → ({end.x},{end.y}) {dur}ms  [ts:{unix_ts}]")
 
@@ -502,6 +573,7 @@ class UniversalRecorder:
         print("  t              - จับหน้าจอ แล้วเลือก element ที่จะกด")
         print("  tap X Y        - เพิ่ม tap ที่พิกัดตรงๆ")
         print("  swipe X1 Y1 X2 Y2 [ms]  - เพิ่ม swipe")
+        print("  e              - แสดง elements ทั้งหมดบนหน้าจอ (แยกตามประเภท)")
         print("  s [stage]      - เพิ่ม screenshot step (+ส่ง)")
         print("  w [secs]       - เพิ่ม wait")
         print("  k [keycode]    - เพิ่ม key event (4=BACK 3=HOME)")
@@ -541,6 +613,9 @@ class UniversalRecorder:
                 elif cmd == "swipe" and len(args) >= 4:
                     dur = int(args[4]) if len(args) > 4 else 300
                     self._add_swipe(int(args[0]), int(args[1]), int(args[2]), int(args[3]), dur)
+                elif cmd == "e":
+                    # Show all elements on screen, categorized by type
+                    self._display_all_elements_categorized()
                 elif cmd == "s":
                     stage = args[0] if args else f"screen{self.recording.next_id()}"
                     self._add_screenshot(stage)
