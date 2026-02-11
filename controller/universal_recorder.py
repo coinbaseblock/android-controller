@@ -35,9 +35,10 @@ import subprocess
 import sys
 import threading
 import time
+import xml.etree.ElementTree as ET
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Set
 
 from universal_format import (
     Frame, RecordingMeta, RecordingSettings, UniversalRecording, KEY_NAMES,
@@ -180,6 +181,52 @@ class UniversalRecorder:
             }
         except Exception:
             return None
+
+    def _get_all_text_at_point(self, x: int, y: int) -> Set[str]:
+        """Get all text content from elements at a screen coordinate (including children)."""
+        try:
+            xml = get_ui_xml(self.serial)
+            root = ET.fromstring(xml)
+
+            def parse_bounds(bounds_str: str) -> tuple:
+                match = re.match(r"\[(\d+),(\d+)\]\[(\d+),(\d+)\]", bounds_str)
+                if not match:
+                    return (0, 0, 0, 0)
+                return tuple(int(x) for x in match.groups())
+
+            def contains_point(bounds: tuple, px: int, py: int) -> bool:
+                return bounds[0] <= px <= bounds[2] and bounds[1] <= py <= bounds[3]
+
+            def collect_text(node: ET.Element, texts: Set[str]) -> None:
+                """Recursively collect all text from nodes."""
+                if node.tag == "node":
+                    text = node.attrib.get("text", "").strip()
+                    if text:
+                        texts.add(text)
+                for child in node:
+                    collect_text(child, texts)
+
+            # Find all elements containing the point
+            texts: Set[str] = set()
+
+            def walk(node: ET.Element, inside_target: bool = False) -> None:
+                if node.tag == "node":
+                    bounds_str = node.attrib.get("bounds", "")
+                    bounds = parse_bounds(bounds_str)
+                    if contains_point(bounds, x, y):
+                        # Collect text from this node and all its children
+                        collect_text(node, texts)
+                        inside_target = True
+
+                # Continue walking even if we found a match (to find overlapping elements)
+                if not inside_target:
+                    for child in node:
+                        walk(child, inside_target)
+
+            walk(root)
+            return texts
+        except Exception:
+            return set()
 
     def _ms_since_start(self) -> int:
         return int((time.time() - self._start_time) * 1000)
@@ -329,7 +376,8 @@ class UniversalRecorder:
                         key_name=key_name,
                     )
                     self._add_frame(frame)
-                    print(f"\r  Key: {key_name} ({keycode})")
+                    unix_ts = int(time.time())
+                    print(f"\r  Key: {key_name} ({keycode})  [ts:{unix_ts}]")
                     self._pending_key_code = None
                 continue
 
@@ -354,7 +402,8 @@ class UniversalRecorder:
                     self._gesture_buffer.append(frame)
 
                     if action == "down":
-                        sys.stdout.write(f"\r  Touch DOWN ({sx}, {sy})")
+                        unix_ts = int(time.time())
+                        sys.stdout.write(f"\r  Touch DOWN ({sx}, {sy})  [ts:{unix_ts}]")
                         sys.stdout.flush()
 
                 elif self._touch_active:
@@ -373,7 +422,8 @@ class UniversalRecorder:
                     self._gesture_buffer.append(frame)
                     self._touch_active = False
 
-                    sys.stdout.write(f"\r  Touch UP   ({sx}, {sy})")
+                    unix_ts = int(time.time())
+                    sys.stdout.write(f"\r  Touch UP   ({sx}, {sy})  [ts:{unix_ts}]")
                     sys.stdout.flush()
 
                     # Flush gesture and optionally annotate
@@ -399,17 +449,29 @@ class UniversalRecorder:
 
         # Auto-annotate if enabled
         element_info = None
+        unix_ts = int(time.time())
+
         if self.auto_annotate and gesture_type in ("tap", "long_press"):
             element_info = self._annotate_point(start.x, start.y)
             if element_info:
                 rid = element_info.get("resource_id", "")
                 txt = element_info.get("text", "")
                 label = txt or (rid.split("/")[-1] if rid else "")
-                print(f"  → {gesture_type} on [{label}]")
+
+                # For long_press, show all text content
+                if gesture_type == "long_press":
+                    all_texts = self._get_all_text_at_point(start.x, start.y)
+                    if all_texts:
+                        texts_display = ", ".join(f'"{t}"' for t in sorted(all_texts))
+                        print(f"  → {gesture_type} on [{label}] - texts: {texts_display}  [ts:{unix_ts}]")
+                    else:
+                        print(f"  → {gesture_type} on [{label}]  [ts:{unix_ts}]")
+                else:
+                    print(f"  → {gesture_type} on [{label}]  [ts:{unix_ts}]")
             else:
-                print(f"  → {gesture_type} at ({start.x}, {start.y}) (no element)")
+                print(f"  → {gesture_type} at ({start.x}, {start.y}) (no element)  [ts:{unix_ts}]")
         elif gesture_type == "swipe":
-            print(f"  → swipe ({start.x},{start.y}) → ({end.x},{end.y}) {dur}ms")
+            print(f"  → swipe ({start.x},{start.y}) → ({end.x},{end.y}) {dur}ms  [ts:{unix_ts}]")
 
         # Add gesture summary frame
         gesture_frame = Frame(
