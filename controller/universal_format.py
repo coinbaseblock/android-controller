@@ -7,7 +7,7 @@ actions, freely mixed. Each entry is a "frame" with a type field.
 
 Frame types:
   - "touch"    : Raw finger touch (down/move/up) with coordinates
-  - "gesture"  : Collapsed gesture (tap/swipe/long_press) from raw touches
+  - "gesture"  : Collapsed gesture (tap/swipe/long_press/two_finger_tap) from raw touches
   - "element"  : Tap on a specific UI element by resource-id/text
   - "app"      : Open or close an app
   - "key"      : Key event (back, home, etc.)
