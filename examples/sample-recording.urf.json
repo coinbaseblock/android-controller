@@ -1,0 +1,150 @@
+{
+  "version": 2,
+  "meta": {
+    "name": "Sample App Flow - Open, Navigate, Screenshot, Close",
+    "created": "2025-01-01T00:00:00",
+    "device": "",
+    "screen_width": 1080,
+    "screen_height": 2400,
+    "app_package": "com.example.myapp",
+    "recording_mode": "mixed",
+    "total_duration_ms": 25000
+  },
+  "settings": {
+    "loop": true,
+    "loop_count": 0,
+    "loop_delay": 5.0,
+    "speed": 1.0,
+    "on_error": "retry",
+    "max_retries": 3,
+    "retry_delay": 2.0,
+    "screenshot_dir": "/img/captures",
+    "send_to": {
+      "method": "cp",
+      "path": "/img/sent"
+    },
+    "notify": true,
+    "notify_method": "stdout",
+    "notify_url": ""
+  },
+  "frames": [
+    {
+      "id": 1,
+      "t": 0,
+      "type": "app",
+      "action": "open",
+      "package": "com.example.myapp",
+      "note": "Launch the app"
+    },
+    {
+      "id": 2,
+      "t": 3000,
+      "type": "wait",
+      "duration_ms": 3000,
+      "note": "Wait for app to load"
+    },
+    {
+      "id": 3,
+      "t": 6000,
+      "type": "element",
+      "action": "tap",
+      "resource_id": "com.example.myapp:id/home_container",
+      "text": "",
+      "timeout": 15,
+      "note": "Wait for home screen element"
+    },
+    {
+      "id": 4,
+      "t": 7000,
+      "type": "screenshot",
+      "stage": "home",
+      "send": true,
+      "note": "Capture home screen"
+    },
+    {
+      "id": 5,
+      "t": 8000,
+      "type": "element",
+      "action": "tap",
+      "resource_id": "com.example.myapp:id/btn_next",
+      "text": "Next",
+      "timeout": 10,
+      "note": "Navigate to page 2"
+    },
+    {
+      "id": 6,
+      "t": 10000,
+      "type": "wait",
+      "duration_ms": 2000,
+      "note": "Wait for page load"
+    },
+    {
+      "id": 7,
+      "t": 12000,
+      "type": "screenshot",
+      "stage": "page2",
+      "send": true,
+      "note": "Capture page 2"
+    },
+    {
+      "id": 8,
+      "t": 13000,
+      "type": "gesture",
+      "action": "swipe",
+      "x": 540,
+      "y": 1800,
+      "x2": 540,
+      "y2": 600,
+      "duration_ms": 300,
+      "note": "Scroll up to see more content"
+    },
+    {
+      "id": 9,
+      "t": 15000,
+      "type": "screenshot",
+      "stage": "page2-scrolled",
+      "send": true,
+      "note": "Capture after scrolling"
+    },
+    {
+      "id": 10,
+      "t": 16000,
+      "type": "gesture",
+      "action": "tap",
+      "x": 540,
+      "y": 1200,
+      "duration_ms": 50,
+      "element": {
+        "resource_id": "com.example.myapp:id/btn_settings",
+        "text": "Settings",
+        "class": "android.widget.Button",
+        "bounds": [100, 1150, 980, 1250]
+      },
+      "note": "Tap Settings (annotated gesture)"
+    },
+    {
+      "id": 11,
+      "t": 19000,
+      "type": "screenshot",
+      "stage": "settings",
+      "send": true,
+      "note": "Capture settings"
+    },
+    {
+      "id": 12,
+      "t": 20000,
+      "type": "key",
+      "keycode": 4,
+      "key_name": "BACK",
+      "note": "Go back"
+    },
+    {
+      "id": 13,
+      "t": 22000,
+      "type": "app",
+      "action": "close",
+      "package": "com.example.myapp",
+      "note": "Force stop app before next loop"
+    }
+  ]
+}

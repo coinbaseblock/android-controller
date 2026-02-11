@@ -1,0 +1,62 @@
+services:
+  adb-server:
+    build: ./controller
+    container_name: adb-server
+    privileged: true
+    # ถ้าใช้ ADB over Wi-Fi อย่างเดียว อาจเอา devices: ออกได้
+    devices:
+      - "/dev/bus/usb:/dev/bus/usb"
+    environment:
+      - ADB_SERVER_PORT=5037
+      - ADB_VENDOR_KEYS=/root/.android
+    volumes:
+      # ใช้ absolute path บน Windows ต้องใส่ในเครื่องหมายคำพูด และใช้ D:/ (ตัวใหญ่ และ forward slash)
+      - "D:/android-controller/adbkeys:/root/.android"
+      - "D:/android-controller/data:/work"
+      - "D:/android-controller/img:/img"
+    ports:
+      - "5037:5037"
+      - "8080:8080"   # Debug dashboard for automation engine
+      - "9090:9090"   # Visual flow editor web UI
+    command: |
+      bash -lc '
+        set -e
+        ( command -v udevd >/dev/null 2>&1 && udevd --daemon ) || true
+        adb kill-server || true
+        # ใช้ $$ เพื่อ escape ไม่ให้ Compose ขยายตัวแปรก่อนเวลา
+        adb start-server -a -H 0.0.0.0 -P $${ADB_SERVER_PORT}
+        echo "ADB server is running on 0.0.0.0:$${ADB_SERVER_PORT}"
+        tail -f /dev/null
+      '
+    restart: unless-stopped
+
+  controller:
+    build: ./controller
+    container_name: android-controller
+    depends_on:
+      - adb-server
+    # ใช้ network เดียวกับ adb-server เพื่อให้ 127.0.0.1 ของคอนเทนเนอร์นี้ ชี้ไปที่ adb-server
+    network_mode: "service:adb-server"
+    environment:
+      # รูปแบบที่ถูกต้องสำหรับ ADB_SERVER_SOCKET คือ tcp:<host>:<port>
+      - ADB_SERVER_SOCKET=tcp:127.0.0.1:5037
+      # เผื่อความเข้ากันได้กับเครื่องมือ/สคริปต์บางตัว
+      - ANDROID_ADB_SERVER_HOST=127.0.0.1
+      - ANDROID_ADB_SERVER_PORT=5037
+    volumes:
+      - "D:/android-controller/adbkeys:/root/.android"
+      - "D:/android-controller/data:/work"
+      - "D:/android-controller/img:/img"
+    command: |
+      bash -lc '
+        echo "controller ready; env:"
+        env | grep -E "ADB|ANDROID" || true
+        echo "adb devices:"
+        adb devices -l || true
+        tail -f /dev/null
+      '
+    restart: unless-stopped
+
+networks:
+  default:
+    driver: bridge

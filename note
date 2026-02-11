@@ -1,0 +1,25 @@
+cd D:\android-controller
+docker compose up -d --build
+
+docker compose exec controller bash
+
+# เช็คว่าเห็นอุปกรณ์
+adb devices -l
+
+# ถ้าใช้ Wi-Fi: จับคู่จากใน container ได้เลย
+adb pair <PHONE_IP>:<PAIR_PORT>     # ป้อน pairing code จากหน้า Wireless debugging
+adb connect <PHONE_IP>:5555
+adb devices -l
+
+# ลองสั่งงาน
+adb shell getprop ro.product.model
+adb shell input tap 540 1200
+adb shell screencap -p /sdcard/s.png && adb pull /sdcard/s.png /work/
+
+udevadm control --reload-rules && udevadm trigger
+adb kill-server && adb start-server -a -H 0.0.0.0 -P 5037
+
+
+usbipd wsl list
+
+docker compose exec controller bash -lc 'TS=$(date +%Y%m%d-%H%M%S); adb exec-out screencap -p > /work/screen-$TS.png; ls -lh /work/screen-$TS.png'

@@ -1,0 +1,82 @@
+usbipd list
+# ต้องเห็น Galaxy A17 = Attached
+# ถ้าไม่ Attached:
+usbipd detach --busid 4-4
+usbipd bind   --busid 4-4
+usbipd attach --wsl --busid 4-4 --auto-attach
+usbipd list
+
+docker compose exec adb-server bash -lc "adb kill-server || true; adb start-server -a -H 0.0.0.0 -P 5037"
+
+docker compose exec adb-server bash -lc "adb devices -l"
+docker compose exec controller bash -lc "adb devices -l"
+
+10.1.1.242
+
+
+
+
+
+
+
+
+
+
+
+
+
+# 1) สั่ง pair (ใช้ Pairing port + Pairing code)
+docker compose exec controller bash -lc "adb pair 10.1.1.242:41519 320302"
+
+# 2) สั่งเชื่อมต่อ (ใช้ IP address & Port ที่หน้า Wireless debugging แสดง)
+docker compose exec controller bash -lc "adb connect 10.1.1.242:36831"
+
+# 3) ตรวจสอบว่ามองเห็นเป็น device แล้ว
+docker compose exec controller bash -lc "adb devices -l"
+
+
+$ts = Get-Date -Format 'yyyyMMdd-HHmmss'
+docker compose exec -T controller bash -lc "adb exec-out screencap -p" > "D:\android-controller\screen-$ts.png"
+
+
+
+
+# ดู BUSID (จดเลขของ Samsung เช่น 4-4)
+usbipd list
+
+# ให้สถานะเป็น Shared (ถ้ายัง)
+usbipd bind --busid 4-4
+
+# Attach เข้า WSL ที่ Docker ใช้ และเปิด auto-attach
+usbipd attach --wsl --busid 4-4 --auto-attach
+
+# ยืนยันว่าเป็น Attached
+usbipd list
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+# 1) ยืนยันว่า Attached อยู่
+usbipd list
+
+# 2) รีสตาร์ท ADB server ในคอนเทนเนอร์
+docker compose exec adb-server bash -lc "adb kill-server || true; adb start-server -a -H 0.0.0.0 -P 5037"
+
+# 3) ดูว่า server เห็น USB Samsung จริง
+docker compose exec adb-server bash -lc "lsusb | grep -i 04e8 || lsusb"
+
+# 4) ขอรายการอุปกรณ์ (ควรเห็น <serial> device หลังอนุมัติบนมือถือ)
+docker compose exec controller bash -lc "adb devices -l"

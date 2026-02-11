@@ -1,0 +1,44 @@
+docker compose down --remove-orphans --rmi local
+
+usbipd wsl list
+usbipd wsl detach --busid <BUSIDของSamsung>
+
+docker ps -a --filter "name=adb-server" --filter "name=android-controller" -q | % { docker rm -f $_ }
+docker images --format "{{.Repository}}:{{.Tag}} {{.ID}}" | findstr android-controller | % {
+  ($_ -split " " | select -last 1) | % { docker rmi -f $_ }
+}
+
+
+docker builder prune -f
+
+Remove-Item -Recurse -Force D:\android-controller\adbkeys
+Remove-Item -Recurse -Force D:\android-controller\data
+
+
+Remove-Item -Recurse -Force D:\android-controller
+
+
+Remove-NetFirewallRule -DisplayName "ADB 5037"
+
+
+# หยุดและลบทุกคอนเทนเนอร์
+docker ps -aq | % { docker rm -f $_ }
+
+# ลบทุกอิมเมจ
+docker images -aq | % { docker rmi -f $_ }
+
+# ลบทุกวอลุ่มที่ Docker จัดการ (ไม่กระทบโฟลเดอร์บน D: ที่เป็น bind mount)
+docker volume prune -f
+
+# ลบทุก network ที่ไม่ได้ใช้งาน
+docker network prune -f
+
+# เก็บกวาด build cache และขยะทั้งหมด (รวม volumes ที่ไม่ได้อ้างอิง)
+docker builder prune -af
+docker system prune -af --volumes
+
+
+
+
+
+wsl --shutdown

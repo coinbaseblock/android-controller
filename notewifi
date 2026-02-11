@@ -1,0 +1,110 @@
+docker compose up -d --force-recreate
+
+เปิด Developer options → Wireless debugging
+
+กด Pair device with pairing code แล้วจด:
+
+PHONE_IP (เช่น 10.1.1.242)
+
+PAIR_PORT (เช่น 41519)
+
+PAIRING_CODE (เช่น 320302)
+
+ADB_PORT ที่แสดงใต้ “IP address & Port” (เช่น 39427) ← อันนี้ไว้ใช้ adb connect (ไม่ใช่พอร์ต pair)
+
+หมายเหตุ: โค้ด/พอร์ตสำหรับ pair มีอายุสั้น เปิดหน้าคู่ใหม่ถ้าช้าหรือพิมพ์ผิด
+
+
+
+
+
+cd D:\android-controller
+docker compose up -d --build
+docker compose logs -f adb-server
+
+adb pair 10.1.1.242:39555 055491
+
+
+docker compose exec controller bash
+adb version
+# (เลือก) ทดสอบว่าเห็น IP มือถือ
+ping -c 1 10.1.1.242
+
+# ใช้ค่าจริงจากมือถือของคุณ (ตัวอย่างด้านล่างเป็นค่าตัวอย่างของคุณ)
+adb pair 10.1.1.242:40013 365001
+adb connect 10.1.1.242:43849
+adb devices -l
+exit
+
+
+docker compose exec controller bash -lc "adb connect 10.1.1.242:43849 && adb devices -l"
+
+
+$ts = Get-Date -Format 'yyyyMMdd-HHmmss'
+
+
+
+start D:\android-controller\data
+
+
+docker compose exec controller bash -lc "adb mdns services | sed -n 's/^[[:space:]]*\\([0-9.]*:[0-9]*\\)[[:space:]]*_adb-tls-connect._tcp.*/\\1/p'"
+
+
+
+
+
+docker compose exec -T controller bash -lc '
+  DEV=10.1.1.242:43849;
+  TS=$(date +%m%d%y-%H%M%S);
+  adb connect "$DEV" >/dev/null 2>&1 || true
+  adb -s "$DEV" exec-out screencap -p > "/img/screen-$TS.png"
+  ls -lh "/img/screen-$TS.png"
+'
+
+
+
+
+
+
+
+
+
+$DEV = "10.1.1.242:43849"
+docker compose exec controller bash -lc "adb connect $DEV && adb devices -l"
+
+
+
+
+
+
+
+
+
+
+
+docker compose exec controller bash
+
+adb pair 10.1.1.242:45157 042927
+adb connect 10.1.1.242:44525
+
+
+D:\android-controller>docker compose exec controller bash
+root@847d88686ebb:/work# adb pair 10.1.1.242:39555 055491
+Successfully paired to 10.1.1.242:39555 [guid=adb-R58Y912V84K-Hue5xt]
+root@847d88686ebb:/work# adb connect 10.1.1.242:43849
+connected to 10.1.1.242:43849
+root@847d88686ebb:/work# adb devices -l
+List of devices attached
+10.1.1.242:43849       device product:a17xx model:SM_A175F device:a17 transport_id:1
+
+root@847d88686ebb:/work# exit
+exit
+
+
+docker compose exec -T controller bash -lc '
+  DEV=10.1.1.242:43849
+  TS=$(date +%s)
+  adb connect "$DEV" >/dev/null 2>&1 || true
+  adb -s "$DEV" exec-out screencap -p > "/img/screen-$TS.png"
+  ls -lh "/img/screen-$TS.png"
+'

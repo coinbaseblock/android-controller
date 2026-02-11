@@ -1,0 +1,41 @@
+download
+
+https://github.com/dorssel/usbipd-win/releases
+
+usbipd --version
+
+usbipd list
+
+usbipd bind --busid 4-4
+
+usbipd attach --wsl docker-desktop --busid 4-4
+
+docker compose exec adb-server bash -lc "adb kill-server || true; adb start-server -a -H 0.0.0.0 -P 5037"
+
+docker compose exec adb-server bash -lc "/lib/systemd/systemd-udevd --daemon || true; udevadm control --reload-rules || true; udevadm trigger || true"
+
+
+usbipd attach --wsl docker-desktop --busid 4-4
+usbipd list
+docker compose exec adb-server bash -lc "lsusb | grep -i 04e8 || lsusb"
+docker compose exec controller bash -lc "adb devices -l"
+
+
+
+PS D:\android-controller> usbipd list
+Connected:
+BUSID  VID:PID    DEVICE                                                        STATE
+2-1    1d5c:7112  Billboard Device                                              Not shared
+2-2    0db0:1901  Xbox 360 Controller for Windows, USB Input Device             Not shared
+2-4    27c6:6092  Goodix MOC Fingerprint                                        Not shared
+2-6    8087:0033  Intel(R) Wireless Bluetooth(R)                                Not shared
+3-3    0bda:8153  Realtek USB GbE Family Controller                             Not shared
+4-4    04e8:6860  Galaxy A17, SAMSUNG Mobile USB Modem, ADB Interface           Not shared
+
+Persisted:
+GUID                                  DEVICE
+
+PS D:\android-controller> usbipd bind --busid 4-4
+PS D:\android-controller>
+
+usbipd attach --wsl docker-desktop --busid 4-4

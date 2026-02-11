@@ -1,0 +1,24 @@
+usbipd detach --busid 4-4
+usbipd bind   --busid 4-4
+usbipd attach --wsl --busid 4-4 --auto-attach
+docker compose exec adb-server   bash -lc "adb kill-server || true; adb start-server -a -H 0.0.0.0 -P 5037"
+docker compose exec adb-server   bash -lc "lsusb | grep -i 04e8 || lsusb"   # ต้องเห็น 04e8:6860
+docker compose exec controller   bash -lc "adb devices -l"                   # ตอนนี้มือถือควรเด้ง Allow → กด Allow
+docker compose exec controller   bash -lc "adb devices -l"                   # ต้องเห็น <serial> device
+
+
+
+
+usbipd detach --busid 4-4
+usbipd bind   --busid 4-4
+usbipd attach --wsl --busid 4-4 --auto-attach
+usbipd list   # ต้องเห็น STATE = Attached
+
+
+docker compose exec adb-server bash -lc "adb start-server -a -H 0.0.0.0 -P 5037 || true"
+docker compose exec adb-server bash -lc "lsusb | grep -i 04e8 || lsusb"   # ควรเห็น 04e8:6860
+
+docker compose exec controller bash -lc "adb devices -l"
+
+docker compose exec controller bash -lc 'TS=$(date +%Y%m%d-%H%M%S); adb -d shell screencap -p /sdcard/s.png && adb -d pull /sdcard/s.png /work/screen-$TS.png'
+start D:\android-controller\data

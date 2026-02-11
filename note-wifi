@@ -1,0 +1,30 @@
+docker compose down -v
+docker compose up -d --build --force-recreate
+
+
+docker compose up -d --build --force-recreate controller
+
+docker compose exec -T controller bash -lc 'mount | grep " /img " || true; ls -ld /img'
+
+
+docker compose up -d
+
+docker compose exec controller bash
+
+adb pair 10.1.1.242:39141 820924
+
+adb connect 10.1.1.242:43473
+
+adb devices -l
+
+docker compose exec -T controller bash -lc 'ls -ld /img && touch /img/.ok && ls -l /img/.ok'
+
+docker compose exec -T controller bash -lc '
+  set -e
+  DEV=10.1.1.242:43849
+  TS=$(date +%s)
+  mkdir -p /img
+  adb devices | grep -q "$DEV" || adb connect "$DEV" || true
+  adb -s "$DEV" exec-out screencap -p > "/img/screen-$TS.png"
+  ls -lh "/img/screen-$TS.png"
+'

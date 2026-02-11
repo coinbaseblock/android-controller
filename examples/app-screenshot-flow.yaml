@@ -1,0 +1,96 @@
+# =====================================================================
+# Example: Open app → navigate pages → screenshot → send → close → loop
+# =====================================================================
+# Usage:
+#   docker compose exec controller automation-engine.py /work/app-screenshot-flow.yaml --debug-port 8080
+#
+# Or dry-run first:
+#   docker compose exec controller automation-engine.py /work/app-screenshot-flow.yaml --dry-run
+
+flow:
+  name: "App Screenshot Automation"
+  app_package: "com.example.myapp"          # <<< เปลี่ยนเป็น package จริง
+  app_activity: ""                           # ว่างไว้ = เปิด main activity
+  device: ""                                 # ว่างไว้ = ใช้เครื่องแรกที่เจอ
+  loop: true                                 # วนซ้ำไม่หยุด
+  loop_count: 0                              # 0 = ไม่จำกัดรอบ
+  loop_delay: 5                              # พัก 5 วินาทีก่อนเริ่มรอบใหม่
+  screenshot_dir: "/img/captures"
+  send_to:
+    method: "cp"                             # cp | curl | adb-push
+    path: "/img/sent"                        # สำหรับ cp
+    # method: "curl"
+    # url: "https://your-server.com/upload"
+    # headers:
+    #   Authorization: "Bearer your-token"
+
+on_error:
+  notify: true
+  notify_method: "stdout"                    # stdout | webhook | file
+  # notify_url: "https://hooks.example.com/alert"   # สำหรับ webhook
+  screenshot_on_error: true                  # ถ่ายหน้าจอเมื่อ error
+  max_retries: 3                             # ลองใหม่ 3 ครั้ง
+  retry_delay: 2                             # รอ 2 วิก่อนลองใหม่
+  pause_on_error: false                      # true = หยุดรอ user เข้ามาดู
+
+steps:
+  # 1. เปิดแอป
+  - action: "open_app"
+    description: "Launch the app"
+
+  # 2. รอให้แอปโหลดเสร็จ
+  - action: "wait"
+    duration: 3
+    description: "Wait for app to load"
+
+  # 3. รอ element ที่หน้า home ปรากฏ
+  - action: "wait_element"
+    resource_id: "com.example.myapp:id/home_container"
+    timeout: 15
+    description: "Wait for home screen"
+
+  # 4. ถ่ายหน้าจอหน้าแรก + ส่ง
+  - action: "screenshot"
+    stage: "home"
+    send: true
+    description: "Capture home screen"
+
+  # 5. กดปุ่มไปหน้าถัดไป (ใช้ resource-id)
+  - action: "tap_element"
+    resource_id: "com.example.myapp:id/btn_next"
+    timeout: 10
+    screenshot_after: true
+    description: "Tap Next button"
+
+  # 6. รอหน้าโหลด
+  - action: "wait"
+    duration: 2
+
+  # 7. ถ่ายหน้าจอหน้าที่สอง + ส่ง
+  - action: "screenshot"
+    stage: "page2"
+    send: true
+    description: "Capture page 2"
+
+  # 8. กดปุ่มโดยใช้ข้อความ (fallback)
+  - action: "tap_element"
+    text: "Settings"
+    timeout: 10
+    description: "Tap Settings"
+
+  # 9. ถ่ายหน้าจอ settings + ส่ง
+  - action: "screenshot"
+    stage: "settings"
+    send: true
+    description: "Capture settings"
+
+  # 10. กด Back
+  - action: "key_event"
+    keycode: 4
+    description: "Press back"
+
+  # 11. ปิดแอป
+  - action: "close_app"
+    description: "Force stop app"
+
+  # (แล้ววนรอบใหม่อัตโนมัติ)
