@@ -120,6 +120,9 @@ class UniversalPlayer:
         self._running = False
         self._debug_server: Any = None
 
+        # Buffer for raw touch sequences (down -> move -> ... -> up)
+        self._touch_buffer: List[Frame] = []
+
         # Prepare frames based on replay mode
         self._frames = self._prepare_frames()
         self.state.total_steps = len(self._frames)
@@ -239,6 +242,8 @@ class UniversalPlayer:
 
             prev_t = frame.t
 
+        # Flush any remaining touch buffer at end of loop
+        self._flush_touch_buffer()
         return True
 
     def _execute_frame(self, frame: Frame, idx: int, loop_idx: int) -> bool:
@@ -296,12 +301,47 @@ class UniversalPlayer:
     # ---------- Frame executors ----------
 
     def _exec_touch(self, frame: Frame) -> None:
-        """Execute raw touch using input tap/swipe."""
-        # For raw touches, we just send taps for down events
-        # (move/up are part of the stream but we collapse them)
+        """Execute raw touch by buffering down->move->up into proper gestures."""
         if frame.action == "down":
-            self.log(f"  Touch down ({frame.x}, {frame.y})", "STEP")
-            send_tap(self.serial, frame.x, frame.y)
+            # Flush any previous incomplete buffer
+            self._flush_touch_buffer()
+            self._touch_buffer = [frame]
+        elif frame.action == "move":
+            self._touch_buffer.append(frame)
+        elif frame.action == "up":
+            self._touch_buffer.append(frame)
+            self._flush_touch_buffer()
+
+    def _flush_touch_buffer(self) -> None:
+        """Convert buffered raw touches into a tap or swipe and execute."""
+        if not self._touch_buffer:
+            return
+
+        start = self._touch_buffer[0]
+        end = self._touch_buffer[-1]
+
+        # Use Euclidean distance for accurate gesture detection
+        dx = end.x - start.x
+        dy = end.y - start.y
+        dist = (dx * dx + dy * dy) ** 0.5
+        dur = end.t - start.t
+
+        if dist < 30 and dur < 500:
+            # Tap
+            self.log(f"  Touch tap ({start.x}, {start.y})", "STEP")
+            send_tap(self.serial, start.x, start.y)
+        elif dist < 30 and dur >= 500:
+            # Long press
+            actual_dur = max(500, int(dur / self.speed))
+            self.log(f"  Touch long-press ({start.x}, {start.y}) {dur}ms", "STEP")
+            send_swipe(self.serial, start.x, start.y, start.x, start.y, actual_dur)
+        else:
+            # Swipe - use actual start and end coordinates from the touch sequence
+            actual_dur = max(1, int(dur / self.speed)) if dur > 0 else 300
+            self.log(f"  Touch swipe ({start.x},{start.y})->({end.x},{end.y}) {dur}ms", "STEP")
+            send_swipe(self.serial, start.x, start.y, end.x, end.y, actual_dur)
+
+        self._touch_buffer.clear()
 
     def _exec_gesture(self, frame: Frame) -> None:
         """Execute a gesture (tap/swipe/long_press/two_finger_tap)."""
