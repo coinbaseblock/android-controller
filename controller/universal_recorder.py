@@ -528,6 +528,9 @@ class UniversalRecorder:
                 continue
 
             if ev_type == "EV_SYN" and code == "SYN_REPORT":
+                # Detect finger lift: touch was active but no more active slots
+                finger_lifted = self._touch_active and len(self._active_slots) == 0
+
                 if pending_update and self._last_x is not None and self._last_y is not None:
                     sx, sy = self._scale_coord(self._last_x, self._last_y)
 
@@ -553,7 +556,8 @@ class UniversalRecorder:
                         sys.stdout.write(f"\r  Touch DOWN ({sx}, {sy})  [ts:{unix_ts}]")
                         sys.stdout.flush()
 
-                elif self._touch_active:
+                if finger_lifted:
+                    # Use the last known coordinates for the up event
                     sx = self._last_x or 0
                     sy = self._last_y or 0
                     sx, sy = self._scale_coord(sx, sy)
@@ -584,18 +588,37 @@ class UniversalRecorder:
 
         start = self._gesture_buffer[0]
         end = self._gesture_buffer[-1]
-        dist = abs(end.x - start.x) + abs(end.y - start.y)
+
+        # Use Euclidean distance for more accurate gesture classification
+        # Manhattan distance misclassifies diagonal movements
+        dx = end.x - start.x
+        dy = end.y - start.y
+        dist = (dx * dx + dy * dy) ** 0.5
+
+        # Also compute max displacement from start across all frames
+        # This catches swipes that return near the starting point
+        max_dist = 0.0
+        for f in self._gesture_buffer:
+            fdx = f.x - start.x
+            fdy = f.y - start.y
+            d = (fdx * fdx + fdy * fdy) ** 0.5
+            if d > max_dist:
+                max_dist = d
+
         dur = end.t - start.t
+
+        # Use the greater of endpoint distance and max displacement
+        effective_dist = max(dist, max_dist)
 
         # Determine gesture type
         # Check for two-finger tap: started with 2+ fingers and small movement
-        is_two_finger_tap = self._gesture_start_slot_count >= 2 and dist < 30 and dur < 500
+        is_two_finger_tap = self._gesture_start_slot_count >= 2 and effective_dist < 30 and dur < 500
 
         if is_two_finger_tap:
             gesture_type = "two_finger_tap"
-        elif dist < 30 and dur < 500:
+        elif effective_dist < 30 and dur < 500:
             gesture_type = "tap"
-        elif dist < 30:
+        elif effective_dist < 30:
             gesture_type = "long_press"
         else:
             gesture_type = "swipe"
@@ -633,6 +656,17 @@ class UniversalRecorder:
             elif gesture_type == "swipe":
                 print(f"  → swipe ({start.x},{start.y}) → ({end.x},{end.y}) {dur}ms  [ts:{unix_ts}]")
 
+        # For swipe, use the actual last touch position for end coordinates
+        # For taps, x2/y2 match start
+        if gesture_type == "swipe":
+            # Find the frame with max distance from start for the "true" endpoint
+            # In case the swipe path curves, use the last frame's position
+            swipe_end_x = end.x
+            swipe_end_y = end.y
+        else:
+            swipe_end_x = start.x
+            swipe_end_y = start.y
+
         # Add gesture summary frame
         gesture_frame = Frame(
             id=self.recording.next_id(),
@@ -640,7 +674,7 @@ class UniversalRecorder:
             type="gesture",
             action=gesture_type,
             x=start.x, y=start.y,
-            x2=end.x, y2=end.y,
+            x2=swipe_end_x, y2=swipe_end_y,
             duration_ms=dur,
             element=element_info,
         )

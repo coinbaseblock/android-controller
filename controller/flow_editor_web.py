@@ -29,6 +29,8 @@ from __future__ import annotations
 
 import json
 import os
+import signal
+import subprocess
 import sys
 import threading
 import argparse
@@ -40,6 +42,179 @@ from urllib.parse import urlparse, parse_qs
 # Add script dir to path for imports
 sys.path.insert(0, str(Path(__file__).parent))
 from universal_format import UniversalRecording, Frame
+
+
+# ============================================================
+# Process Manager for Play/Record subprocesses
+# ============================================================
+
+class ProcessManager:
+    """Manages background player/recorder subprocesses."""
+
+    def __init__(self) -> None:
+        self._proc: Optional[subprocess.Popen] = None
+        self._status: str = "idle"  # idle | playing | recording | stopped | error
+        self._current_step: int = 0
+        self._total_steps: int = 0
+        self._frames_count: int = 0
+        self._message: str = ""
+        self._lock = threading.Lock()
+        self._monitor_thread: Optional[threading.Thread] = None
+
+    @property
+    def status(self) -> str:
+        with self._lock:
+            # Check if process died
+            if self._proc and self._proc.poll() is not None:
+                self._status = "idle"
+                self._proc = None
+            return self._status
+
+    def get_status_dict(self) -> dict:
+        with self._lock:
+            if self._proc and self._proc.poll() is not None:
+                self._status = "idle"
+                self._proc = None
+            return {
+                "status": self._status,
+                "current_step": self._current_step,
+                "total_steps": self._total_steps,
+                "frames_count": self._frames_count,
+                "message": self._message,
+            }
+
+    def start_play(self, recording_path: str, work_dir: str) -> dict:
+        with self._lock:
+            if self._proc and self._proc.poll() is None:
+                return {"ok": False, "error": "Process already running"}
+
+            script = str(Path(__file__).parent / "universal_player.py")
+            cmd = [sys.executable, script, recording_path, "--replay-mode", "auto"]
+
+            try:
+                self._proc = subprocess.Popen(
+                    cmd,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.STDOUT,
+                    text=True,
+                    cwd=work_dir,
+                )
+                self._status = "playing"
+                self._current_step = 0
+                self._total_steps = 0
+                self._message = ""
+                self._start_monitor()
+                return {"ok": True}
+            except Exception as e:
+                self._status = "error"
+                self._message = str(e)
+                return {"ok": False, "error": str(e)}
+
+    def start_record(self, output_path: str, package: str, device: str, work_dir: str) -> dict:
+        with self._lock:
+            if self._proc and self._proc.poll() is None:
+                return {"ok": False, "error": "Process already running"}
+
+            script = str(Path(__file__).parent / "universal_recorder.py")
+            cmd = [
+                sys.executable, script,
+                "--mode", "raw",
+                "--annotate",
+                "-p", package,
+                "-o", output_path,
+            ]
+            if device:
+                cmd += ["-s", device]
+
+            try:
+                self._proc = subprocess.Popen(
+                    cmd,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.STDOUT,
+                    stdin=subprocess.PIPE,
+                    text=True,
+                    cwd=work_dir,
+                    preexec_fn=os.setsid,
+                )
+                self._status = "recording"
+                self._frames_count = 0
+                self._message = ""
+                self._start_monitor()
+                return {"ok": True}
+            except Exception as e:
+                self._status = "error"
+                self._message = str(e)
+                return {"ok": False, "error": str(e)}
+
+    def stop(self) -> dict:
+        with self._lock:
+            if not self._proc or self._proc.poll() is not None:
+                self._status = "idle"
+                self._proc = None
+                return {"ok": True}
+
+            try:
+                # Send SIGINT (Ctrl+C) for graceful shutdown
+                os.killpg(os.getpgid(self._proc.pid), signal.SIGINT)
+                try:
+                    self._proc.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    os.killpg(os.getpgid(self._proc.pid), signal.SIGKILL)
+                    self._proc.wait(timeout=3)
+            except (ProcessLookupError, OSError):
+                pass
+
+            self._status = "idle"
+            self._proc = None
+            return {"ok": True}
+
+    def _start_monitor(self) -> None:
+        if self._monitor_thread and self._monitor_thread.is_alive():
+            return
+        self._monitor_thread = threading.Thread(target=self._monitor_output, daemon=True)
+        self._monitor_thread.start()
+
+    def _monitor_output(self) -> None:
+        """Read subprocess stdout to track progress."""
+        proc = self._proc
+        if not proc or not proc.stdout:
+            return
+
+        try:
+            for line in proc.stdout:
+                line = line.strip()
+                if not line:
+                    continue
+
+                with self._lock:
+                    # Track player progress
+                    if "STEP" in line or "> " in line:
+                        self._current_step += 1
+                    if "Frames:" in line:
+                        try:
+                            parts = line.split("Frames:")[1].strip()
+                            num = int(parts.split(",")[0].strip())
+                            self._total_steps = num
+                        except (ValueError, IndexError):
+                            pass
+                    # Track recorder frames
+                    if "Touch DOWN" in line or "Touch UP" in line:
+                        self._frames_count += 1
+
+                    # Print to server console for debugging
+                    print(f"  [{self._status}] {line}", flush=True)
+
+        except Exception:
+            pass
+        finally:
+            with self._lock:
+                if self._proc == proc:
+                    self._status = "idle"
+                    self._proc = None
+
+
+# Global process manager
+_proc_manager = ProcessManager()
 
 
 EDITOR_HTML = r"""<!DOCTYPE html>
@@ -185,6 +360,48 @@ input:focus, select:focus, textarea:focus { outline: none; border-color: var(--b
 .hover-scope-label { position: absolute; top: 2px; right: 4px; font-size: 9px; color: var(--blue); background: rgba(88,166,255,.15); padding: 1px 5px; border-radius: 3px; pointer-events: none; z-index: 50; opacity: 0; transition: opacity .15s; text-transform: uppercase; letter-spacing: .5px; }
 [data-hover-scope].hover-active > .hover-scope-label { opacity: 1; }
 
+/* === PLAY/REC CONTROLS === */
+.playback-controls { display: flex; align-items: center; gap: 8px; }
+.btn-play { background: #238636; border-color: #238636; color: #fff; display: inline-flex; align-items: center; gap: 6px; }
+.btn-play:hover { background: #2ea043; }
+.btn-play.active { background: #1a7f37; animation: pulse-green 1.5s ease-in-out infinite; }
+.btn-rec { background: #da3633; border-color: #da3633; color: #fff; display: inline-flex; align-items: center; gap: 6px; }
+.btn-rec:hover { background: #f85149; }
+.btn-rec.active { background: #b62324; animation: pulse-red 1.5s ease-in-out infinite; }
+.btn-stop { background: #6e7681; border-color: #6e7681; color: #fff; display: inline-flex; align-items: center; gap: 6px; }
+.btn-stop:hover { background: #8b949e; }
+.btn-stop:disabled { opacity: .4; cursor: not-allowed; }
+
+.rec-dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: #ff4444; }
+.rec-dot.active { animation: blink-dot 1s ease-in-out infinite; }
+.play-icon { font-size: 12px; }
+
+.playback-status { display: flex; align-items: center; gap: 8px; font-size: 12px; color: var(--text2); }
+.playback-status .status-badge { padding: 2px 8px; border-radius: 10px; font-size: 11px; font-weight: 600; text-transform: uppercase; }
+.status-idle { background: #6e768133; color: #8b949e; }
+.status-recording { background: #da363333; color: #f85149; }
+.status-playing { background: #23863633; color: #3fb950; }
+.status-error { background: #da363333; color: #f85149; }
+
+.playback-progress { flex: 1; max-width: 200px; height: 4px; background: var(--bg3); border-radius: 2px; overflow: hidden; }
+.playback-progress-bar { height: 100%; background: var(--green); border-radius: 2px; transition: width .3s ease; width: 0%; }
+.playback-progress-bar.recording { background: var(--red); }
+
+.playback-step { font-size: 11px; color: var(--text2); font-family: monospace; min-width: 60px; }
+
+@keyframes pulse-green {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(35, 134, 54, 0.6); }
+  50% { box-shadow: 0 0 0 6px rgba(35, 134, 54, 0); }
+}
+@keyframes pulse-red {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(218, 54, 51, 0.6); }
+  50% { box-shadow: 0 0 0 6px rgba(218, 54, 51, 0); }
+}
+@keyframes blink-dot {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.2; }
+}
+
 /* === SCROLLBAR === */
 ::-webkit-scrollbar { width: 8px; height: 8px; }
 ::-webkit-scrollbar-track { background: transparent; }
@@ -199,6 +416,26 @@ input:focus, select:focus, textarea:focus { outline: none; border-color: var(--b
   <div class="topbar" data-hover-scope="topbar">
     <h1>Flow Editor</h1>
     <span id="fileName" style="color:var(--text2);font-size:13px;">No file loaded</span>
+    <div class="sep" style="width:1px;height:24px;background:var(--border);margin:0 4px"></div>
+    <!-- Play/Rec Controls -->
+    <div class="playback-controls">
+      <button class="btn btn-sm btn-play" id="btnPlay" onclick="startPlay()" title="Play recording">
+        <span class="play-icon">&#9654;</span> Play
+      </button>
+      <button class="btn btn-sm btn-rec" id="btnRec" onclick="startRecord()" title="Record touches">
+        <span class="rec-dot" id="recDot"></span> Rec
+      </button>
+      <button class="btn btn-sm btn-stop" id="btnStop" onclick="stopPlayback()" disabled title="Stop">
+        &#9632; Stop
+      </button>
+    </div>
+    <div class="playback-status" id="playbackStatus">
+      <span class="status-badge status-idle" id="statusBadge">IDLE</span>
+      <div class="playback-progress" id="progressContainer" style="display:none">
+        <div class="playback-progress-bar" id="progressBar"></div>
+      </div>
+      <span class="playback-step" id="stepInfo"></span>
+    </div>
     <span class="spacer"></span>
     <button class="btn btn-sm" onclick="loadFileList()">Refresh</button>
     <button class="btn btn-sm btn-primary" onclick="saveFile()">Save</button>
@@ -1089,6 +1326,163 @@ function toast(msg, type='') {
   setTimeout(() => el.remove(), 3000);
 }
 
+// ============================================================
+// PLAY / RECORD CONTROLS
+// ============================================================
+let playbackState = 'idle'; // idle | playing | recording
+let statusPollTimer = null;
+
+function updatePlaybackUI(state, info) {
+  playbackState = state;
+  const btnPlay = document.getElementById('btnPlay');
+  const btnRec = document.getElementById('btnRec');
+  const btnStop = document.getElementById('btnStop');
+  const statusBadge = document.getElementById('statusBadge');
+  const recDot = document.getElementById('recDot');
+  const progressContainer = document.getElementById('progressContainer');
+  const progressBar = document.getElementById('progressBar');
+  const stepInfo = document.getElementById('stepInfo');
+
+  // Reset all
+  btnPlay.classList.remove('active');
+  btnRec.classList.remove('active');
+  recDot.classList.remove('active');
+  progressBar.classList.remove('recording');
+
+  if (state === 'idle') {
+    btnPlay.disabled = false;
+    btnRec.disabled = false;
+    btnStop.disabled = true;
+    statusBadge.className = 'status-badge status-idle';
+    statusBadge.textContent = 'IDLE';
+    progressContainer.style.display = 'none';
+    stepInfo.textContent = '';
+    stopStatusPoll();
+  } else if (state === 'playing') {
+    btnPlay.classList.add('active');
+    btnPlay.disabled = true;
+    btnRec.disabled = true;
+    btnStop.disabled = false;
+    statusBadge.className = 'status-badge status-playing';
+    statusBadge.textContent = 'PLAYING';
+    progressContainer.style.display = '';
+    if (info) {
+      const pct = info.total_steps > 0 ? (info.current_step / info.total_steps * 100) : 0;
+      progressBar.style.width = pct + '%';
+      stepInfo.textContent = info.current_step + '/' + info.total_steps;
+    }
+  } else if (state === 'recording') {
+    btnRec.classList.add('active');
+    recDot.classList.add('active');
+    btnPlay.disabled = true;
+    btnRec.disabled = true;
+    btnStop.disabled = false;
+    statusBadge.className = 'status-badge status-recording';
+    statusBadge.textContent = 'REC';
+    progressContainer.style.display = '';
+    progressBar.classList.add('recording');
+    progressBar.style.width = '100%';
+    if (info) {
+      stepInfo.textContent = (info.frames_count || 0) + ' frames';
+    }
+  } else if (state === 'error') {
+    btnPlay.disabled = false;
+    btnRec.disabled = false;
+    btnStop.disabled = true;
+    statusBadge.className = 'status-badge status-error';
+    statusBadge.textContent = 'ERROR';
+    progressContainer.style.display = 'none';
+    stepInfo.textContent = info?.message || '';
+    stopStatusPoll();
+  }
+}
+
+async function startPlay() {
+  if (!recording || !filePath) { toast('No file loaded', 'error'); return; }
+  // Save first
+  await saveFile();
+  try {
+    const res = await api('POST', '/play', { path: filePath });
+    if (res.ok) {
+      updatePlaybackUI('playing', {current_step: 0, total_steps: recording.frames.length});
+      toast('Playback started', 'success');
+      startStatusPoll();
+    } else {
+      toast('Play failed: ' + (res.error || ''), 'error');
+    }
+  } catch (e) {
+    toast('Play error: ' + e.message, 'error');
+  }
+}
+
+async function startRecord() {
+  if (!recording) { toast('No file loaded', 'error'); return; }
+  const pkg = recording.meta?.app_package || '';
+  if (!pkg) {
+    toast('Set app package first in Recording Info', 'error');
+    return;
+  }
+  try {
+    const res = await api('POST', '/record', {
+      path: filePath || '/work/new-recording.urf.json',
+      package: pkg,
+      device: recording.meta?.device || '',
+    });
+    if (res.ok) {
+      updatePlaybackUI('recording', {frames_count: 0});
+      toast('Recording started - interact with device', 'success');
+      startStatusPoll();
+    } else {
+      toast('Record failed: ' + (res.error || ''), 'error');
+    }
+  } catch (e) {
+    toast('Record error: ' + e.message, 'error');
+  }
+}
+
+async function stopPlayback() {
+  try {
+    const res = await api('POST', '/stop');
+    if (res.ok) {
+      updatePlaybackUI('idle', null);
+      toast('Stopped', 'success');
+      // Reload file if was recording
+      if (filePath) {
+        setTimeout(() => loadFile(filePath), 500);
+      }
+    }
+  } catch (e) {
+    toast('Stop error: ' + e.message, 'error');
+    updatePlaybackUI('idle', null);
+  }
+}
+
+function startStatusPoll() {
+  stopStatusPoll();
+  statusPollTimer = setInterval(async () => {
+    try {
+      const res = await api('GET', '/status');
+      if (res.status === 'idle' || res.status === 'stopped') {
+        updatePlaybackUI('idle', null);
+        if (filePath) {
+          loadFile(filePath);
+          loadFileList();
+        }
+      } else if (res.status === 'playing') {
+        updatePlaybackUI('playing', res);
+      } else if (res.status === 'recording') {
+        updatePlaybackUI('recording', res);
+      } else if (res.status === 'error') {
+        updatePlaybackUI('error', res);
+      }
+    } catch (e) { /* ignore poll errors */ }
+  }, 1000);
+}
+
+function stopStatusPoll() {
+  if (statusPollTimer) { clearInterval(statusPollTimer); statusPollTimer = null; }
+}
+
 // INIT
 loadFileList();
 </script>
@@ -1118,6 +1512,8 @@ class EditorHandler(BaseHTTPRequestHandler):
         elif path == "/api/load":
             fp = params.get("path", [""])[0]
             self._json(self._load_file(fp))
+        elif path == "/api/status":
+            self._json(_proc_manager.get_status_dict())
         else:
             self._error(404, "Not Found")
 
@@ -1132,6 +1528,12 @@ class EditorHandler(BaseHTTPRequestHandler):
             self._json(self._collapse(body))
         elif path == "/api/hover-log":
             self._json(self._hover_log(body))
+        elif path == "/api/play":
+            self._json(self._start_play(body))
+        elif path == "/api/record":
+            self._json(self._start_record(body))
+        elif path == "/api/stop":
+            self._json(_proc_manager.stop())
         else:
             self._error(404, "Not Found")
 
@@ -1242,6 +1644,24 @@ class EditorHandler(BaseHTTPRequestHandler):
             return {"frames": [f.to_dict() for f in collapsed]}
         except Exception as e:
             return {"error": str(e)}
+
+    def _start_play(self, body: dict) -> dict:
+        recording_path = body.get("path", "")
+        if not recording_path:
+            return {"ok": False, "error": "No recording path specified"}
+        if not Path(recording_path).exists():
+            return {"ok": False, "error": f"File not found: {recording_path}"}
+        return _proc_manager.start_play(recording_path, self.work_dir)
+
+    def _start_record(self, body: dict) -> dict:
+        output_path = body.get("path", "")
+        package = body.get("package", "")
+        device = body.get("device", "")
+        if not package:
+            return {"ok": False, "error": "No package specified"}
+        if not output_path:
+            output_path = str(Path(self.work_dir) / "new-recording.urf.json")
+        return _proc_manager.start_record(output_path, package, device, self.work_dir)
 
     def _hover_log(self, body: dict) -> dict:
         """Print hover details to terminal for quick inspection while editing."""

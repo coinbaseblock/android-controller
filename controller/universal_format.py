@@ -332,12 +332,27 @@ class UniversalRecording:
                 return
             start = buffer[0]
             end = buffer[-1]
-            dist = abs(end.x - start.x) + abs(end.y - start.y)
+
+            # Use Euclidean distance for accurate gesture classification
+            dx = end.x - start.x
+            dy = end.y - start.y
+            dist = (dx * dx + dy * dy) ** 0.5
+
+            # Also check max displacement across all frames
+            max_dist = dist
+            for bf in buffer:
+                bdx = bf.x - start.x
+                bdy = bf.y - start.y
+                bd = (bdx * bdx + bdy * bdy) ** 0.5
+                if bd > max_dist:
+                    max_dist = bd
+            effective_dist = max(dist, max_dist)
+
             dur = end.t - start.t
 
-            if dist < 30 and dur < 500:
+            if effective_dist < 30 and dur < 500:
                 action = "tap"
-            elif dist < 30 and dur >= 500:
+            elif effective_dist < 30 and dur >= 500:
                 action = "long_press"
             else:
                 action = "swipe"
