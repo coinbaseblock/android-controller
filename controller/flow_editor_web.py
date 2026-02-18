@@ -179,6 +179,12 @@ input:focus, select:focus, textarea:focus { outline: none; border-color: var(--b
 .toast.error { border-color: var(--red); color: var(--red); }
 @keyframes fadeIn { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: translateY(0); } }
 
+/* === HOVER SCOPE HIGHLIGHT === */
+[data-hover-scope] { transition: box-shadow .15s, outline .15s; position: relative; }
+[data-hover-scope].hover-active { outline: 1px solid var(--blue); outline-offset: -1px; box-shadow: inset 0 0 0 1px rgba(88,166,255,.12); }
+.hover-scope-label { position: absolute; top: 2px; right: 4px; font-size: 9px; color: var(--blue); background: rgba(88,166,255,.15); padding: 1px 5px; border-radius: 3px; pointer-events: none; z-index: 50; opacity: 0; transition: opacity .15s; text-transform: uppercase; letter-spacing: .5px; }
+[data-hover-scope].hover-active > .hover-scope-label { opacity: 1; }
+
 /* === SCROLLBAR === */
 ::-webkit-scrollbar { width: 8px; height: 8px; }
 ::-webkit-scrollbar-track { background: transparent; }
@@ -190,7 +196,7 @@ input:focus, select:focus, textarea:focus { outline: none; border-color: var(--b
 <div class="app" id="app">
 
   <!-- TOP BAR -->
-  <div class="topbar">
+  <div class="topbar" data-hover-scope="topbar">
     <h1>Flow Editor</h1>
     <span id="fileName" style="color:var(--text2);font-size:13px;">No file loaded</span>
     <span class="spacer"></span>
@@ -205,13 +211,13 @@ input:focus, select:focus, textarea:focus { outline: none; border-color: var(--b
     <!-- SIDEBAR -->
     <div class="sidebar">
       <!-- Files -->
-      <div class="sidebar-section">
+      <div class="sidebar-section" data-hover-scope="files">
         <h3>Files</h3>
         <div class="file-list" id="fileList"></div>
       </div>
 
       <!-- Meta -->
-      <div class="sidebar-section" id="metaPanel">
+      <div class="sidebar-section" id="metaPanel" data-hover-scope="meta">
         <h3>Recording Info</h3>
         <div class="setting-row"><label>Name</label><input id="metaName" onchange="updateMeta()"></div>
         <div class="setting-row"><label>Package</label><input id="metaPkg" onchange="updateMeta()"></div>
@@ -222,7 +228,7 @@ input:focus, select:focus, textarea:focus { outline: none; border-color: var(--b
       </div>
 
       <!-- Settings -->
-      <div class="sidebar-section">
+      <div class="sidebar-section" data-hover-scope="settings">
         <h3>Playback Settings</h3>
         <div class="setting-row"><label>Speed</label><input type="number" step="0.1" min="0.1" id="setSpeed" value="1.0" onchange="updateSettings()"></div>
         <div class="setting-row"><label>Loop</label>
@@ -241,7 +247,7 @@ input:focus, select:focus, textarea:focus { outline: none; border-color: var(--b
       </div>
 
       <!-- Bulk Actions -->
-      <div class="sidebar-section">
+      <div class="sidebar-section" data-hover-scope="bulk-actions">
         <h3>Bulk Actions</h3>
         <div class="btn-group" style="flex-wrap:wrap;gap:6px">
           <button class="btn btn-sm" onclick="collapseRaw()" title="Collapse raw touches into gestures">Collapse Raw</button>
@@ -256,7 +262,7 @@ input:focus, select:focus, textarea:focus { outline: none; border-color: var(--b
     <!-- MAIN CONTENT -->
     <div class="content">
       <!-- Toolbar -->
-      <div class="toolbar">
+      <div class="toolbar" data-hover-scope="toolbar">
         <div class="view-tabs">
           <button class="view-tab active" data-view="all" onclick="setView('all',this)">All Frames</button>
           <button class="view-tab" data-view="script" onclick="setView('script',this)">Script Only</button>
@@ -275,11 +281,11 @@ input:focus, select:focus, textarea:focus { outline: none; border-color: var(--b
       </div>
 
       <!-- Timeline -->
-      <div class="timeline" id="timeline"></div>
+      <div class="timeline" id="timeline" data-hover-scope="timeline"></div>
     </div>
 
     <!-- DETAIL PANEL -->
-    <div class="detail-panel" id="detailPanel">
+    <div class="detail-panel" id="detailPanel" data-hover-scope="detail">
       <div class="detail-header">
         <h3>Frame Detail</h3>
         <button class="btn btn-sm" onclick="closeDetail()">Close</button>
@@ -482,6 +488,13 @@ function buildFrameHoverText(f) {
     `desc=${describeFrame(f)}`,
   ];
   if (f.note) parts.push(`note=${f.note}`);
+  if (f.x !== undefined && f.y !== undefined) parts.push(`pos=(${f.x},${f.y})`);
+  if (f.action === 'swipe' && f.x2 !== undefined) parts.push(`to=(${f.x2},${f.y2})`);
+  if (f.resource_id) parts.push(`resource_id=${f.resource_id}`);
+  if (f.text) parts.push(`text=${f.text}`);
+  if (f.package) parts.push(`package=${f.package}`);
+  if (f.command) parts.push(`command=${f.command}`);
+  if (f.duration_ms) parts.push(`duration=${f.duration_ms}ms`);
   if (f.element) parts.push('element=' + JSON.stringify(f.element));
   return parts.join(' | ');
 }
@@ -503,6 +516,130 @@ function logHoverFrame(frameId) {
     message: buildFrameHoverText(frame),
   }).catch(() => {});
 }
+
+// ============================================================
+// GENERIC HOVER-TO-TERMINAL (all sections)
+// ============================================================
+let lastScopeKey = '';
+let lastScopeAt = 0;
+let activeScopeEl = null;
+
+function collectScopeText(scope, el) {
+  switch(scope) {
+    case 'topbar': {
+      const fname = document.getElementById('fileName')?.textContent || '';
+      return `File: ${fname}`;
+    }
+    case 'files': {
+      const items = el.querySelectorAll('.file-item');
+      if (!items.length) return 'No files loaded';
+      const names = Array.from(items).map(e => {
+        const active = e.classList.contains('active') ? ' (active)' : '';
+        return e.textContent.trim() + active;
+      });
+      return `Files (${names.length}): ${names.join(', ')}`;
+    }
+    case 'meta': {
+      if (!recording) return 'No recording loaded';
+      const m = recording.meta || {};
+      const parts = [
+        `Name: ${m.name || '-'}`,
+        `Package: ${m.app_package || '-'}`,
+        `Device: ${m.device || '-'}`,
+        `Mode: ${m.recording_mode || 'mixed'}`,
+        `Frames: ${recording.frames.length}`,
+      ];
+      const maxT = recording.frames.length ? Math.max(...recording.frames.map(f=>f.t)) : 0;
+      parts.push(`Duration: ${(maxT/1000).toFixed(1)}s`);
+      return parts.join(' | ');
+    }
+    case 'settings': {
+      if (!recording) return 'No recording loaded';
+      const s = recording.settings || {};
+      return [
+        `Speed: ${s.speed || 1}x`,
+        `Loop: ${s.loop ? 'on' : 'off'} (count=${s.loop_count||0}, delay=${s.loop_delay||5}s)`,
+        `OnError: ${s.on_error || 'retry'}`,
+        `MaxRetries: ${s.max_retries || 3}`,
+      ].join(' | ');
+    }
+    case 'bulk-actions': {
+      return 'Actions: Collapse Raw, Compact, Scale Time, Shift Time, Clear All';
+    }
+    case 'toolbar': {
+      const view = currentView;
+      const frames = getVisibleFrames();
+      return `View: ${view} | Showing: ${frames.length} frames | Selected: ${selectedId >= 0 ? '#'+selectedId : 'none'}`;
+    }
+    case 'timeline': {
+      if (!recording || !recording.frames.length) return 'Timeline: empty';
+      const frames = getVisibleFrames();
+      const types = {};
+      frames.forEach(f => { types[f.type] = (types[f.type]||0) + 1; });
+      const breakdown = Object.entries(types).map(([t,c]) => `${t}:${c}`).join(', ');
+      const maxT = Math.max(...frames.map(f=>f.t));
+      return `Timeline: ${frames.length} frames | ${(maxT/1000).toFixed(1)}s | ${breakdown}`;
+    }
+    case 'detail': {
+      if (!recording || selectedId < 0) return 'No frame selected';
+      const f = recording.frames.find(fr => fr.id === selectedId);
+      if (!f) return 'Frame not found';
+      return buildFrameHoverText(f);
+    }
+    default: {
+      // Fallback: collect visible text
+      const txt = el.innerText.replace(/\s+/g, ' ').trim();
+      return txt.substring(0, 300);
+    }
+  }
+}
+
+function initHoverScopes() {
+  document.querySelectorAll('[data-hover-scope]').forEach(el => {
+    // Inject scope label
+    const lbl = document.createElement('span');
+    lbl.className = 'hover-scope-label';
+    lbl.textContent = el.dataset.hoverScope;
+    el.appendChild(lbl);
+  });
+
+  document.addEventListener('mouseover', (e) => {
+    const scopeEl = e.target.closest('[data-hover-scope]');
+    if (!scopeEl) {
+      if (activeScopeEl) { activeScopeEl.classList.remove('hover-active'); activeScopeEl = null; }
+      return;
+    }
+
+    // Highlight active scope
+    if (activeScopeEl && activeScopeEl !== scopeEl) activeScopeEl.classList.remove('hover-active');
+    scopeEl.classList.add('hover-active');
+    activeScopeEl = scopeEl;
+
+    const scope = scopeEl.dataset.hoverScope;
+    const now = Date.now();
+    // Rate limit: don't re-send for same scope within 700ms
+    if (scope === lastScopeKey && (now - lastScopeAt) < 700) return;
+    lastScopeKey = scope;
+    lastScopeAt = now;
+
+    const message = collectScopeText(scope, scopeEl);
+    if (!message) return;
+
+    api('POST', '/hover-log', {
+      scope: scope,
+      message: message,
+    }).catch(() => {});
+  });
+
+  document.addEventListener('mouseout', (e) => {
+    if (!e.relatedTarget || !e.relatedTarget.closest('[data-hover-scope]')) {
+      if (activeScopeEl) { activeScopeEl.classList.remove('hover-active'); activeScopeEl = null; }
+    }
+  });
+}
+
+// Init hover scopes after DOM is ready
+initHoverScopes();
 
 function renderMeta() {
   if (!recording) return;
@@ -1114,8 +1251,21 @@ class EditorHandler(BaseHTTPRequestHandler):
         if not msg:
             return {"ok": False, "error": "Missing message"}
 
+        # Scope-specific icons for readability
+        scope_icons = {
+            "topbar": "📂",
+            "files": "📁",
+            "meta": "ℹ️",
+            "settings": "⚙️",
+            "bulk-actions": "🔧",
+            "toolbar": "🔲",
+            "timeline": "📋",
+            "timeline-frame": "▶",
+            "detail": "📝",
+        }
+        icon = scope_icons.get(scope, "👁")
         frame_part = f" frame={frame_id}" if frame_id is not None else ""
-        print(f"[hover:{scope}{frame_part}] {msg}", flush=True)
+        print(f"{icon} [{scope}{frame_part}] {msg}", flush=True)
         return {"ok": True}
 
     # Response helpers
