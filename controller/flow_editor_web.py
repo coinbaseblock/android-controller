@@ -317,6 +317,8 @@ let currentView = 'all'; // all | script | raw
 let addInsertPos = -1;   // -1 = append
 let addSelectedType = '';
 let dragSrcIdx = -1;
+let lastHoverKey = '';
+let lastHoverAt = 0;
 
 const FRAME_TYPES = [
   {type:'gesture',  icon:'👆', name:'Gesture',    desc:'Tap / Swipe / Long Press'},
@@ -417,6 +419,7 @@ function renderTimeline() {
     const tSec = (f.t / 1000).toFixed(1);
     return `<div class="frame-card${sel}${dis}" data-id="${f.id}" data-idx="${idx}"
                  onclick="selectFrame(${f.id})" draggable="true"
+                 onmouseenter="logHoverFrame(${f.id})"
                  ondragstart="onDragStart(event,${idx})" ondragover="onDragOver(event)" ondrop="onDrop(event,${idx})" ondragend="onDragEnd(event)">
       <div class="frame-type-bar type-${f.type}"></div>
       <div class="frame-body">
@@ -469,6 +472,36 @@ function describeFrame(f) {
     case 'marker': return f.note || '(marker)';
     default: return f.action || f.type;
   }
+}
+
+function buildFrameHoverText(f) {
+  const parts = [
+    `Frame #${f.id} (${f.type})`,
+    `time=${f.t}ms`,
+    `enabled=${f.enabled !== false}`,
+    `desc=${describeFrame(f)}`,
+  ];
+  if (f.note) parts.push(`note=${f.note}`);
+  if (f.element) parts.push('element=' + JSON.stringify(f.element));
+  return parts.join(' | ');
+}
+
+function logHoverFrame(frameId) {
+  if (!recording) return;
+  const frame = recording.frames.find(f => f.id === frameId);
+  if (!frame) return;
+
+  const hoverKey = `frame-${frame.id}-${frame.t}-${frame.type}`;
+  const now = Date.now();
+  if (hoverKey === lastHoverKey && (now - lastHoverAt) < 700) return;
+  lastHoverKey = hoverKey;
+  lastHoverAt = now;
+
+  api('POST', '/hover-log', {
+    scope: 'timeline-frame',
+    frame_id: frame.id,
+    message: buildFrameHoverText(frame),
+  }).catch(() => {});
 }
 
 function renderMeta() {
@@ -960,6 +993,8 @@ class EditorHandler(BaseHTTPRequestHandler):
             self._json(self._save_file(body))
         elif path == "/api/collapse":
             self._json(self._collapse(body))
+        elif path == "/api/hover-log":
+            self._json(self._hover_log(body))
         else:
             self._error(404, "Not Found")
 
@@ -1070,6 +1105,18 @@ class EditorHandler(BaseHTTPRequestHandler):
             return {"frames": [f.to_dict() for f in collapsed]}
         except Exception as e:
             return {"error": str(e)}
+
+    def _hover_log(self, body: dict) -> dict:
+        """Print hover details to terminal for quick inspection while editing."""
+        scope = str(body.get("scope", "ui"))
+        frame_id = body.get("frame_id")
+        msg = str(body.get("message", "")).strip()
+        if not msg:
+            return {"ok": False, "error": "Missing message"}
+
+        frame_part = f" frame={frame_id}" if frame_id is not None else ""
+        print(f"[hover:{scope}{frame_part}] {msg}", flush=True)
+        return {"ok": True}
 
     # Response helpers
     def _html(self, content: str) -> None:
