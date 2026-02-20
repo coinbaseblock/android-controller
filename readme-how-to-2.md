@@ -142,6 +142,70 @@ start D:\android-controller\data
   - `adb disconnect <ip:port>` → `adb connect <ip:port>` ใหม่
   - มือถือ/พีซี ต้องอยู่ Wi-Fi เดียวกัน และเปิดหน้าจอ Wireless debugging ไว้ตอน pair/connect
 
+### `docker compose ps` ชื่อไม่ตรงกับ service และ `CREATED` ไม่เปลี่ยน ต้องทำยังไง?
+- `docker compose config --services` จะแสดง **ชื่อ service** เช่น `adb-server`, `controller`
+- `docker compose ps` คอลัมน์ `NAME` จะแสดง **container name ที่รันจริง** (อาจถูกตั้งด้วย `container_name`) จึงเห็นเป็น `android-controller` ได้ ถือว่าปกติ
+- ถ้า `docker compose up -d --build` แล้ว `CREATED` ยังเป็นหลายวันก่อน แปลว่าคอนเทนเนอร์เดิมยังถูก reuse อยู่ (ยังไม่ได้ recreate)
+
+บังคับ recreate เฉพาะ `controller` (ปลอดภัยและชัวร์สุด):
+```powershell
+cd D:\android-controller
+docker compose rm -sf controller
+docker compose up -d --build --force-recreate --no-deps controller
+docker compose ps
+```
+
+บังคับ recreate ทั้ง stack:
+```powershell
+cd D:\android-controller
+docker compose down
+docker compose up -d --build --force-recreate
+docker compose ps
+```
+
+กรณีต้อง rebuild แบบไม่ใช้ cache:
+```powershell
+cd D:\android-controller
+docker compose build --no-cache controller
+docker compose rm -sf controller
+docker compose up -d --force-recreate --no-deps controller
+docker compose ps
+```
+
+หมายเหตุ ADB:
+- recreate แค่ `controller` มัก **ไม่ต้อง pair ใหม่** เพราะ `adb-server` ยังอยู่
+- ถ้า recreate `adb-server` หรือใช้ `down -v` มีโอกาสต้อง `adb pair` / `adb connect` ใหม่
+
+
+### หลัง reboot แล้วอยากให้ต่อ Wi-Fi ADB อัตโนมัติ
+สาเหตุที่ต้องต่อใหม่บ่อย ๆ: `adb connect` แบบ Wireless debugging จะผูกกับ `IP:PORT` ชั่วคราว ซึ่ง **port อาจเปลี่ยนหลัง reboot** เลยใช้ค่าเดิมไม่ได้ทุกครั้ง
+
+วิธีที่แนะนำ: ใช้สคริปต์ startup ให้ `docker compose up` แล้ววนเรียก mDNS reconnect อัตโนมัติ
+```powershell
+cd D:\android-controller
+.\scripts\startup-auto-connect.ps1 -Build -RetryForever
+```
+
+ตัวเลือกที่ใช้บ่อย:
+```powershell
+# จำกัด device เฉพาะเครื่องนี้ (IP หรือ IP:PORT)
+.\scripts\startup-auto-connect.ps1 -Device 192.168.1.102 -RetryForever
+
+# พยายาม 30 ครั้ง ครั้งละ 5 วินาที แล้วหยุด
+.\scripts\startup-auto-connect.ps1 -MaxRetries 30 -RetryDelaySeconds 5
+```
+
+ให้รันอัตโนมัติหลังเข้า Windows (Task Scheduler):
+```powershell
+$action = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument '-NoProfile -ExecutionPolicy Bypass -File "D:\android-controller\scripts\startup-auto-connect.ps1" -RetryForever'
+$trigger = New-ScheduledTaskTrigger -AtLogOn
+Register-ScheduledTask -TaskName 'AndroidControllerAutoConnect' -Action $action -Trigger $trigger -Description 'Start docker compose and auto reconnect wireless ADB' -User $env:USERNAME
+```
+
+หมายเหตุ:
+- ครั้งแรกยังต้อง `adb pair` ให้สำเร็จก่อน (คีย์ถูกเก็บใน `D:/android-controller/adbkeys`)
+- เปิด **Wireless debugging** บนมือถือไว้ตอนเครื่องเริ่มใหม่ เพื่อให้ mDNS หาเจอและ reconnect ได้
+
 ---
 
 ## 6) ปิดงาน/ล้างงาน
