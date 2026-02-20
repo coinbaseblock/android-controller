@@ -327,21 +327,54 @@ class UniversalPlayer:
         dur = end.t - start.t
 
         if dist < 30 and dur < 500:
-            # Tap
-            self.log(f"  Touch tap ({start.x}, {start.y})", "STEP")
-            send_tap(self.serial, start.x, start.y)
+            # Tap - use centroid for better accuracy
+            n = len(self._touch_buffer)
+            cx = sum(f.x for f in self._touch_buffer) // n
+            cy = sum(f.y for f in self._touch_buffer) // n
+            self.log(f"  Touch tap ({cx}, {cy})", "STEP")
+            send_tap(self.serial, cx, cy)
         elif dist < 30 and dur >= 500:
-            # Long press
+            # Long press - use centroid
+            n = len(self._touch_buffer)
+            cx = sum(f.x for f in self._touch_buffer) // n
+            cy = sum(f.y for f in self._touch_buffer) // n
             actual_dur = max(500, int(dur / self.speed))
-            self.log(f"  Touch long-press ({start.x}, {start.y}) {dur}ms", "STEP")
-            send_swipe(self.serial, start.x, start.y, start.x, start.y, actual_dur)
+            self.log(f"  Touch long-press ({cx}, {cy}) {dur}ms", "STEP")
+            send_swipe(self.serial, cx, cy, cx, cy, actual_dur)
         else:
-            # Swipe - use actual start and end coordinates from the touch sequence
-            actual_dur = max(1, int(dur / self.speed)) if dur > 0 else 300
-            self.log(f"  Touch swipe ({start.x},{start.y})->({end.x},{end.y}) {dur}ms", "STEP")
-            send_swipe(self.serial, start.x, start.y, end.x, end.y, actual_dur)
+            # Swipe - replay with intermediate segments for better path accuracy
+            move_frames = [f for f in self._touch_buffer if f.action == "move"]
+            if len(move_frames) > 4:
+                # Use segmented swipe for curved paths
+                self.log(f"  Touch swipe ({start.x},{start.y})->({end.x},{end.y}) {dur}ms [{len(move_frames)} pts]", "STEP")
+                self._replay_segmented_swipe(start.x, start.y, move_frames, dur)
+            else:
+                actual_dur = max(1, int(dur / self.speed)) if dur > 0 else 300
+                self.log(f"  Touch swipe ({start.x},{start.y})->({end.x},{end.y}) {dur}ms", "STEP")
+                send_swipe(self.serial, start.x, start.y, end.x, end.y, actual_dur)
 
         self._touch_buffer.clear()
+
+    def _replay_segmented_swipe(
+        self, start_x: int, start_y: int, move_frames: List[Frame], total_dur: int
+    ) -> None:
+        """Replay a swipe using multiple segments for better path accuracy."""
+        # Sample ~5 segments from the move frames
+        step = max(1, len(move_frames) // 5)
+        points = [(start_x, start_y)]
+        for i in range(0, len(move_frames), step):
+            points.append((move_frames[i].x, move_frames[i].y))
+        # Always include end
+        last = move_frames[-1]
+        if points[-1] != (last.x, last.y):
+            points.append((last.x, last.y))
+
+        # Execute each segment
+        seg_dur = max(1, int((total_dur / max(1, len(points) - 1)) / self.speed))
+        for i in range(len(points) - 1):
+            x1, y1 = points[i]
+            x2, y2 = points[i + 1]
+            send_swipe(self.serial, x1, y1, x2, y2, seg_dur)
 
     def _exec_gesture(self, frame: Frame) -> None:
         """Execute a gesture (tap/swipe/long_press/two_finger_tap)."""
@@ -367,9 +400,23 @@ class UniversalPlayer:
             send_tap(self.serial, frame.x, frame.y)
 
         elif frame.action == "swipe":
-            self.log(f"  Swipe ({frame.x},{frame.y})→({frame.x2},{frame.y2}) {frame.duration_ms}ms", "STEP")
-            dur = max(1, int(frame.duration_ms / self.speed))
-            send_swipe(self.serial, frame.x, frame.y, frame.x2, frame.y2, dur)
+            if frame.waypoints and len(frame.waypoints) > 1:
+                # Use waypoints for accurate path replay
+                self.log(f"  Swipe ({frame.x},{frame.y})→({frame.x2},{frame.y2}) {frame.duration_ms}ms [{len(frame.waypoints)} pts]", "STEP")
+                points = [(frame.x, frame.y)] + [(wp[0], wp[1]) for wp in frame.waypoints]
+                # Ensure final endpoint is included
+                if points[-1] != (frame.x2, frame.y2):
+                    points.append((frame.x2, frame.y2))
+                total_dur = max(1, int(frame.duration_ms / self.speed))
+                seg_dur = max(1, total_dur // max(1, len(points) - 1))
+                for i in range(len(points) - 1):
+                    x1, y1 = points[i]
+                    x2, y2 = points[i + 1]
+                    send_swipe(self.serial, x1, y1, x2, y2, seg_dur)
+            else:
+                self.log(f"  Swipe ({frame.x},{frame.y})→({frame.x2},{frame.y2}) {frame.duration_ms}ms", "STEP")
+                dur = max(1, int(frame.duration_ms / self.speed))
+                send_swipe(self.serial, frame.x, frame.y, frame.x2, frame.y2, dur)
 
         elif frame.action == "long_press":
             self.log(f"  Long press ({frame.x}, {frame.y}) {frame.duration_ms}ms", "STEP")

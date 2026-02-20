@@ -362,44 +362,84 @@ input:focus, select:focus, textarea:focus { outline: none; border-color: var(--b
 
 /* === PLAY/REC CONTROLS === */
 .playback-controls { display: flex; align-items: center; gap: 8px; }
-.btn-play { background: #238636; border-color: #238636; color: #fff; display: inline-flex; align-items: center; gap: 6px; }
-.btn-play:hover { background: #2ea043; }
+.btn-play { background: #238636; border-color: #238636; color: #fff; display: inline-flex; align-items: center; gap: 6px; position: relative; overflow: hidden; transition: all .2s ease; }
+.btn-play:hover { background: #2ea043; transform: scale(1.05); }
+.btn-play:active { transform: scale(0.95); }
 .btn-play.active { background: #1a7f37; animation: pulse-green 1.5s ease-in-out infinite; }
-.btn-rec { background: #da3633; border-color: #da3633; color: #fff; display: inline-flex; align-items: center; gap: 6px; }
-.btn-rec:hover { background: #f85149; }
-.btn-rec.active { background: #b62324; animation: pulse-red 1.5s ease-in-out infinite; }
-.btn-stop { background: #6e7681; border-color: #6e7681; color: #fff; display: inline-flex; align-items: center; gap: 6px; }
-.btn-stop:hover { background: #8b949e; }
-.btn-stop:disabled { opacity: .4; cursor: not-allowed; }
+.btn-play.active .play-icon { animation: spin-play 1s linear infinite; }
+.btn-rec { background: #da3633; border-color: #da3633; color: #fff; display: inline-flex; align-items: center; gap: 6px; position: relative; overflow: hidden; transition: all .2s ease; }
+.btn-rec:hover { background: #f85149; transform: scale(1.05); }
+.btn-rec:active { transform: scale(0.95); }
+.btn-rec.active { background: #b62324; animation: pulse-red 1.5s ease-in-out infinite; border-color: #ff4444; }
+.btn-stop { background: #6e7681; border-color: #6e7681; color: #fff; display: inline-flex; align-items: center; gap: 6px; transition: all .2s ease; }
+.btn-stop:hover { background: #8b949e; transform: scale(1.05); }
+.btn-stop:active { transform: scale(0.95); }
+.btn-stop:disabled { opacity: .4; cursor: not-allowed; transform: none; }
 
-.rec-dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: #ff4444; }
-.rec-dot.active { animation: blink-dot 1s ease-in-out infinite; }
-.play-icon { font-size: 12px; }
+/* Ripple effect on click */
+.btn-play::after, .btn-rec::after, .btn-stop::after {
+  content: ''; position: absolute; inset: 0; background: radial-gradient(circle, rgba(255,255,255,.3) 10%, transparent 60%);
+  opacity: 0; transition: opacity .3s;
+}
+.btn-play:active::after, .btn-rec:active::after, .btn-stop:active::after { opacity: 1; }
+
+.rec-dot { display: inline-block; width: 10px; height: 10px; border-radius: 50%; background: #ff4444; transition: all .2s; }
+.rec-dot.active { animation: blink-dot 1s ease-in-out infinite; box-shadow: 0 0 6px 2px rgba(255, 68, 68, 0.6); }
+.play-icon { font-size: 12px; display: inline-block; }
 
 .playback-status { display: flex; align-items: center; gap: 8px; font-size: 12px; color: var(--text2); }
-.playback-status .status-badge { padding: 2px 8px; border-radius: 10px; font-size: 11px; font-weight: 600; text-transform: uppercase; }
+.playback-status .status-badge { padding: 2px 8px; border-radius: 10px; font-size: 11px; font-weight: 600; text-transform: uppercase; transition: all .3s ease; }
 .status-idle { background: #6e768133; color: #8b949e; }
-.status-recording { background: #da363333; color: #f85149; }
-.status-playing { background: #23863633; color: #3fb950; }
-.status-error { background: #da363333; color: #f85149; }
+.status-recording { background: #da363344; color: #f85149; animation: badge-glow-red 2s ease-in-out infinite; }
+.status-playing { background: #23863644; color: #3fb950; animation: badge-glow-green 2s ease-in-out infinite; }
+.status-error { background: #da363333; color: #f85149; animation: shake .5s ease-in-out; }
 
-.playback-progress { flex: 1; max-width: 200px; height: 4px; background: var(--bg3); border-radius: 2px; overflow: hidden; }
-.playback-progress-bar { height: 100%; background: var(--green); border-radius: 2px; transition: width .3s ease; width: 0%; }
-.playback-progress-bar.recording { background: var(--red); }
+.playback-progress { flex: 1; max-width: 200px; height: 6px; background: var(--bg3); border-radius: 3px; overflow: hidden; position: relative; }
+.playback-progress-bar { height: 100%; background: linear-gradient(90deg, #238636, #3fb950); border-radius: 3px; transition: width .3s ease; width: 0%; position: relative; }
+.playback-progress-bar::after { content: ''; position: absolute; inset: 0; background: linear-gradient(90deg, transparent, rgba(255,255,255,.15), transparent); animation: shimmer 2s infinite; }
+.playback-progress-bar.recording { background: linear-gradient(90deg, #da3633, #f85149); animation: rec-pulse-bar 1.5s ease-in-out infinite; }
 
 .playback-step { font-size: 11px; color: var(--text2); font-family: monospace; min-width: 60px; }
+.playback-timer { font-size: 12px; color: var(--text); font-family: monospace; font-weight: 600; min-width: 55px; letter-spacing: .5px; }
+.playback-timer.recording { color: #f85149; }
+.playback-timer.playing { color: #3fb950; }
 
 @keyframes pulse-green {
   0%, 100% { box-shadow: 0 0 0 0 rgba(35, 134, 54, 0.6); }
-  50% { box-shadow: 0 0 0 6px rgba(35, 134, 54, 0); }
+  50% { box-shadow: 0 0 0 8px rgba(35, 134, 54, 0); }
 }
 @keyframes pulse-red {
   0%, 100% { box-shadow: 0 0 0 0 rgba(218, 54, 51, 0.6); }
-  50% { box-shadow: 0 0 0 6px rgba(218, 54, 51, 0); }
+  50% { box-shadow: 0 0 0 8px rgba(218, 54, 51, 0); }
 }
 @keyframes blink-dot {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50% { opacity: 0.2; transform: scale(0.8); }
+}
+@keyframes badge-glow-red {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(218, 54, 51, 0); }
+  50% { box-shadow: 0 0 8px 2px rgba(218, 54, 51, 0.3); }
+}
+@keyframes badge-glow-green {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(35, 134, 54, 0); }
+  50% { box-shadow: 0 0 8px 2px rgba(35, 134, 54, 0.3); }
+}
+@keyframes shimmer {
+  0% { transform: translateX(-100%); }
+  100% { transform: translateX(100%); }
+}
+@keyframes rec-pulse-bar {
   0%, 100% { opacity: 1; }
-  50% { opacity: 0.2; }
+  50% { opacity: 0.7; }
+}
+@keyframes shake {
+  0%, 100% { transform: translateX(0); }
+  25% { transform: translateX(-4px); }
+  75% { transform: translateX(4px); }
+}
+@keyframes spin-play {
+  0% { transform: rotate(0deg); }
+  100% { transform: rotate(360deg); }
 }
 
 /* === SCROLLBAR === */
@@ -431,6 +471,7 @@ input:focus, select:focus, textarea:focus { outline: none; border-color: var(--b
     </div>
     <div class="playback-status" id="playbackStatus">
       <span class="status-badge status-idle" id="statusBadge">IDLE</span>
+      <span class="playback-timer" id="playbackTimer" style="display:none">00:00</span>
       <div class="playback-progress" id="progressContainer" style="display:none">
         <div class="playback-progress-bar" id="progressBar"></div>
       </div>
@@ -1331,6 +1372,31 @@ function toast(msg, type='') {
 // ============================================================
 let playbackState = 'idle'; // idle | playing | recording
 let statusPollTimer = null;
+let elapsedTimer = null;
+let elapsedStartTime = null;
+
+function formatElapsed(ms) {
+  const totalSec = Math.floor(ms / 1000);
+  const min = Math.floor(totalSec / 60);
+  const sec = totalSec % 60;
+  return String(min).padStart(2, '0') + ':' + String(sec).padStart(2, '0');
+}
+
+function startElapsedTimer() {
+  elapsedStartTime = Date.now();
+  const timerEl = document.getElementById('playbackTimer');
+  timerEl.style.display = '';
+  timerEl.textContent = '00:00';
+  stopElapsedTimer();
+  elapsedTimer = setInterval(() => {
+    const elapsed = Date.now() - elapsedStartTime;
+    timerEl.textContent = formatElapsed(elapsed);
+  }, 500);
+}
+
+function stopElapsedTimer() {
+  if (elapsedTimer) { clearInterval(elapsedTimer); elapsedTimer = null; }
+}
 
 function updatePlaybackUI(state, info) {
   playbackState = state;
@@ -1342,12 +1408,14 @@ function updatePlaybackUI(state, info) {
   const progressContainer = document.getElementById('progressContainer');
   const progressBar = document.getElementById('progressBar');
   const stepInfo = document.getElementById('stepInfo');
+  const timerEl = document.getElementById('playbackTimer');
 
   // Reset all
   btnPlay.classList.remove('active');
   btnRec.classList.remove('active');
   recDot.classList.remove('active');
   progressBar.classList.remove('recording');
+  timerEl.classList.remove('recording', 'playing');
 
   if (state === 'idle') {
     btnPlay.disabled = false;
@@ -1356,8 +1424,10 @@ function updatePlaybackUI(state, info) {
     statusBadge.className = 'status-badge status-idle';
     statusBadge.textContent = 'IDLE';
     progressContainer.style.display = 'none';
+    timerEl.style.display = 'none';
     stepInfo.textContent = '';
     stopStatusPoll();
+    stopElapsedTimer();
   } else if (state === 'playing') {
     btnPlay.classList.add('active');
     btnPlay.disabled = true;
@@ -1366,6 +1436,8 @@ function updatePlaybackUI(state, info) {
     statusBadge.className = 'status-badge status-playing';
     statusBadge.textContent = 'PLAYING';
     progressContainer.style.display = '';
+    timerEl.style.display = '';
+    timerEl.classList.add('playing');
     if (info) {
       const pct = info.total_steps > 0 ? (info.current_step / info.total_steps * 100) : 0;
       progressBar.style.width = pct + '%';
@@ -1382,6 +1454,8 @@ function updatePlaybackUI(state, info) {
     progressContainer.style.display = '';
     progressBar.classList.add('recording');
     progressBar.style.width = '100%';
+    timerEl.style.display = '';
+    timerEl.classList.add('recording');
     if (info) {
       stepInfo.textContent = (info.frames_count || 0) + ' frames';
     }
@@ -1392,8 +1466,10 @@ function updatePlaybackUI(state, info) {
     statusBadge.className = 'status-badge status-error';
     statusBadge.textContent = 'ERROR';
     progressContainer.style.display = 'none';
+    timerEl.style.display = 'none';
     stepInfo.textContent = info?.message || '';
     stopStatusPoll();
+    stopElapsedTimer();
   }
 }
 
@@ -1405,6 +1481,7 @@ async function startPlay() {
     const res = await api('POST', '/play', { path: filePath });
     if (res.ok) {
       updatePlaybackUI('playing', {current_step: 0, total_steps: recording.frames.length});
+      startElapsedTimer();
       toast('Playback started', 'success');
       startStatusPoll();
     } else {
@@ -1430,6 +1507,7 @@ async function startRecord() {
     });
     if (res.ok) {
       updatePlaybackUI('recording', {frames_count: 0});
+      startElapsedTimer();
       toast('Recording started - interact with device', 'success');
       startStatusPoll();
     } else {

@@ -623,16 +623,29 @@ class UniversalRecorder:
         else:
             gesture_type = "swipe"
 
+        # For taps, compute centroid of all touch points for better accuracy.
+        # Finger jitter means the down point isn't always the intended target;
+        # averaging all frames gives a more stable coordinate.
+        if gesture_type in ("tap", "long_press", "two_finger_tap"):
+            sum_x = sum(f.x for f in self._gesture_buffer)
+            sum_y = sum(f.y for f in self._gesture_buffer)
+            n = len(self._gesture_buffer)
+            tap_x = sum_x // n
+            tap_y = sum_y // n
+        else:
+            tap_x = start.x
+            tap_y = start.y
+
         # Auto-annotate if enabled
         element_info = None
         unix_ts = int(time.time())
 
         if self.auto_annotate:
             if gesture_type in ("tap", "long_press", "two_finger_tap"):
-                element_info = self._annotate_point(start.x, start.y) if gesture_type != "two_finger_tap" else None
+                element_info = self._annotate_point(tap_x, tap_y) if gesture_type != "two_finger_tap" else None
 
                 if gesture_type == "two_finger_tap":
-                    print(f"  → {gesture_type} at ({start.x}, {start.y})  [ts:{unix_ts}]")
+                    print(f"  → {gesture_type} at ({tap_x}, {tap_y})  [ts:{unix_ts}]")
                     # Display all elements in grid format for two-finger tap
                     self._display_elements_as_grid()
                 elif gesture_type == "long_press":
@@ -640,9 +653,9 @@ class UniversalRecorder:
                         rid = element_info.get("resource_id", "")
                         txt = element_info.get("text", "")
                         label = txt or (rid.split("/")[-1] if rid else "")
-                        print(f"  → {gesture_type} on [{label}] at ({start.x}, {start.y})  [ts:{unix_ts}]")
+                        print(f"  → {gesture_type} on [{label}] at ({tap_x}, {tap_y})  [ts:{unix_ts}]")
                     else:
-                        print(f"  → {gesture_type} at ({start.x}, {start.y}) (no element)  [ts:{unix_ts}]")
+                        print(f"  → {gesture_type} at ({tap_x}, {tap_y}) (no element)  [ts:{unix_ts}]")
                     # Display all elements on screen, categorized by type
                     self._display_all_elements_categorized()
                 else:  # tap
@@ -652,20 +665,37 @@ class UniversalRecorder:
                         label = txt or (rid.split("/")[-1] if rid else "")
                         print(f"  → {gesture_type} on [{label}]  [ts:{unix_ts}]")
                     else:
-                        print(f"  → {gesture_type} at ({start.x}, {start.y}) (no element)  [ts:{unix_ts}]")
+                        print(f"  → {gesture_type} at ({tap_x}, {tap_y}) (no element)  [ts:{unix_ts}]")
             elif gesture_type == "swipe":
                 print(f"  → swipe ({start.x},{start.y}) → ({end.x},{end.y}) {dur}ms  [ts:{unix_ts}]")
 
         # For swipe, use the actual last touch position for end coordinates
-        # For taps, x2/y2 match start
+        # For taps, x2/y2 match the centroid
+        waypoints = None
         if gesture_type == "swipe":
-            # Find the frame with max distance from start for the "true" endpoint
-            # In case the swipe path curves, use the last frame's position
             swipe_end_x = end.x
             swipe_end_y = end.y
+
+            # Store intermediate waypoints for accurate swipe path replay.
+            # Sample every few frames to keep the data manageable while
+            # preserving the actual path shape (curves, speed changes).
+            move_frames = [f for f in self._gesture_buffer if f.action == "move"]
+            if len(move_frames) > 2:
+                # Sample ~10-20 waypoints for a typical swipe
+                step = max(1, len(move_frames) // 15)
+                waypoints = []
+                for i in range(0, len(move_frames), step):
+                    mf = move_frames[i]
+                    t_offset = mf.t - start.t
+                    waypoints.append([mf.x, mf.y, t_offset])
+                # Always include the last move frame
+                last_mf = move_frames[-1]
+                last_wp = [last_mf.x, last_mf.y, last_mf.t - start.t]
+                if not waypoints or waypoints[-1] != last_wp:
+                    waypoints.append(last_wp)
         else:
-            swipe_end_x = start.x
-            swipe_end_y = start.y
+            swipe_end_x = tap_x
+            swipe_end_y = tap_y
 
         # Add gesture summary frame
         gesture_frame = Frame(
@@ -673,10 +703,11 @@ class UniversalRecorder:
             t=start.t,
             type="gesture",
             action=gesture_type,
-            x=start.x, y=start.y,
+            x=tap_x, y=tap_y,
             x2=swipe_end_x, y2=swipe_end_y,
             duration_ms=dur,
             element=element_info,
+            waypoints=waypoints,
         )
         self._add_frame(gesture_frame)
         self._gesture_buffer.clear()
