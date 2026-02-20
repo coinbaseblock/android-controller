@@ -159,7 +159,7 @@ class UniversalPlayer:
         icons = {"INFO": " ", "OK": "+", "WARN": "!", "ERROR": "X", "STEP": ">"}
         icon = icons.get(level, " ")
         line = f"[{ts}] {icon} {msg}"
-        print(line)
+        print(line, flush=True)
         self.state.history.append({"ts": ts, "level": level, "msg": msg})
 
     def play(self) -> None:

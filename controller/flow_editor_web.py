@@ -100,7 +100,7 @@ class ProcessManager:
                 else:
                     return {"ok": False, "error": "Player script not found"}
 
-            cmd = [sys.executable, script, recording_path, "--replay-mode", "auto"]
+            cmd = [sys.executable, "-u", script, recording_path, "--replay-mode", "auto"]
 
             try:
                 self._proc = subprocess.Popen(
