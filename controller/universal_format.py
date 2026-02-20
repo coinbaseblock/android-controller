@@ -148,6 +148,8 @@ class Frame:
     y2: int = 0
     pressure: float = 0.0
     duration_ms: int = 0
+    # swipe waypoints: list of [x, y, t_offset_ms] for intermediate points
+    waypoints: Optional[List[List[int]]] = None
     # element info (auto-annotated or explicit)
     element: Optional[Dict[str, Any]] = None
     resource_id: str = ""
@@ -180,6 +182,8 @@ class Frame:
             d.update(action=self.action, x=self.x, y=self.y, duration_ms=self.duration_ms)
             if self.action == "swipe":
                 d.update(x2=self.x2, y2=self.y2)
+                if self.waypoints:
+                    d["waypoints"] = self.waypoints
             if self.element:
                 d["element"] = self.element
         elif self.type == "element":
