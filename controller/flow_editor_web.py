@@ -29,11 +29,13 @@ from __future__ import annotations
 
 import json
 import os
+import re as _re
 import signal
 import subprocess
 import sys
 import threading
 import argparse
+import xml.etree.ElementTree as _ET
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from pathlib import Path
 from typing import Any, Optional
@@ -447,6 +449,58 @@ input:focus, select:focus, textarea:focus { outline: none; border-color: var(--b
 ::-webkit-scrollbar-track { background: transparent; }
 ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 4px; }
 ::-webkit-scrollbar-thumb:hover { background: var(--text2); }
+
+/* === REALTIME PANEL === */
+.realtime-panel {
+  width: 380px; background: var(--bg2); border-left: 1px solid var(--border);
+  display: flex; flex-direction: column; flex-shrink: 0; overflow: hidden;
+}
+.realtime-header {
+  padding: 10px 12px; border-bottom: 1px solid var(--border);
+  display: flex; align-items: center; gap: 8px;
+}
+.realtime-header h3 { font-size: 13px; flex: 1; white-space: nowrap; }
+.realtime-controls { display: flex; align-items: center; gap: 6px; font-size: 12px; }
+.screen-wrapper {
+  position: relative; overflow: hidden; flex-shrink: 0; background: #000;
+}
+.screen-wrapper img { width: 100%; display: block; }
+.element-overlay {
+  position: absolute; border: 1.5px solid var(--blue);
+  background: rgba(88,166,255,0.08); cursor: pointer;
+  transition: background .15s; z-index: 10;
+}
+.element-overlay:hover {
+  background: rgba(88,166,255,0.25); border-color: #fff; z-index: 11;
+}
+.element-overlay .el-label {
+  position: absolute; bottom: -1px; left: 0; font-size: 8px;
+  background: var(--blue); color: #000; padding: 0 3px;
+  white-space: nowrap; max-width: 100%; overflow: hidden;
+  text-overflow: ellipsis; pointer-events: none; line-height: 1.4;
+}
+.element-list-panel { flex: 1; overflow-y: auto; padding: 8px; }
+.element-list-panel h4 {
+  font-size: 11px; text-transform: uppercase; letter-spacing: .5px;
+  color: var(--text2); margin-bottom: 6px;
+}
+.el-item {
+  padding: 5px 8px; border-radius: 4px; font-size: 11px;
+  cursor: pointer; border: 1px solid transparent; margin-bottom: 2px;
+}
+.el-item:hover { background: var(--bg3); border-color: var(--border); }
+.el-item .el-id { color: var(--blue); font-weight: 600; }
+.el-item .el-text { color: var(--text); }
+.el-item .el-class { color: var(--text2); font-size: 10px; }
+.realtime-status {
+  padding: 6px 12px; font-size: 11px; color: var(--text2);
+  border-top: 1px solid var(--border); text-align: center; flex-shrink: 0;
+}
+.no-screen {
+  color: var(--text2); padding: 40px 20px; text-align: center;
+  border: 2px dashed var(--border); border-radius: 8px; margin: 12px;
+}
+.btn-realtime-on { background: #1f6feb !important; border-color: #1f6feb !important; color: #fff !important; }
 </style>
 </head>
 <body>
@@ -482,6 +536,8 @@ input:focus, select:focus, textarea:focus { outline: none; border-color: var(--b
     <button class="btn btn-sm btn-primary" onclick="saveFile()">Save</button>
     <button class="btn btn-sm" onclick="saveAsFile()">Save As</button>
     <button class="btn btn-sm" onclick="exportScript()">Export Script</button>
+    <div class="sep" style="width:1px;height:24px;background:var(--border);margin:0 4px"></div>
+    <button class="btn btn-sm" id="btnRealtime" onclick="toggleRealtime()">Realtime</button>
   </div>
 
   <div class="main">
@@ -571,6 +627,32 @@ input:focus, select:focus, textarea:focus { outline: none; border-color: var(--b
       <div class="detail-body" id="detailBody">
         <p style="color:var(--text2)">Select a frame to edit</p>
       </div>
+    </div>
+
+    <!-- REALTIME PANEL -->
+    <div class="realtime-panel" id="realtimePanel" style="display:none">
+      <div class="realtime-header">
+        <h3>Device Realtime</h3>
+        <div class="realtime-controls">
+          <label style="font-size:11px;display:flex;align-items:center;gap:4px">
+            <input type="checkbox" id="realtimeAuto" style="width:auto"> Auto
+          </label>
+          <button class="btn btn-sm" onclick="captureScreen()">Capture</button>
+          <button class="btn btn-sm" onclick="toggleRealtime()">Close</button>
+        </div>
+      </div>
+      <div style="overflow-y:auto;flex:1">
+        <div class="screen-wrapper" id="screenWrapper">
+          <div class="no-screen" id="noScreen">Click "Capture" to see device screen</div>
+          <img id="screenImg" style="display:none" alt="Device Screen">
+          <div id="elementOverlays" style="position:absolute;top:0;left:0;width:100%;height:100%"></div>
+        </div>
+        <div class="element-list-panel" id="elementListPanel">
+          <h4>Interactive Elements</h4>
+          <div style="color:var(--text2);font-size:12px;padding:4px">Capture to see elements</div>
+        </div>
+      </div>
+      <div class="realtime-status" id="realtimeStatus">Ready</div>
     </div>
   </div>
 </div>
@@ -1493,16 +1575,39 @@ async function startPlay() {
 }
 
 async function startRecord() {
-  if (!recording) { toast('No file loaded', 'error'); return; }
+  // Auto-create a new recording if none is loaded
+  if (!recording) {
+    const pkg = prompt('Enter app package name to record (e.g. com.example.app):');
+    if (!pkg) return;
+    recording = {
+      version: 2,
+      meta: { name: 'New Recording', created: new Date().toISOString(), device: '',
+              screen_width: 1080, screen_height: 2400, app_package: pkg,
+              recording_mode: 'raw', total_duration_ms: 0 },
+      settings: { loop: false, loop_count: 0, loop_delay: 5, speed: 1.0,
+                  on_error: 'retry', max_retries: 3, retry_delay: 2.0,
+                  screenshot_dir: '/img/captures',
+                  send_to: { method: 'cp', path: '/img/sent' },
+                  notify: true, notify_method: 'stdout', notify_url: '' },
+      frames: [],
+    };
+    filePath = '/work/' + pkg.split('.').pop() + '-' + Date.now() + '.urf.json';
+    document.getElementById('fileName').textContent = filePath.split('/').pop();
+    refreshAll();
+    loadFileList();
+  }
   const pkg = recording.meta?.app_package || '';
   if (!pkg) {
-    toast('Set app package first in Recording Info', 'error');
-    return;
+    const p = prompt('Enter app package name:');
+    if (!p) return;
+    recording.meta.app_package = p;
+    document.getElementById('metaPkg').value = p;
   }
   try {
+    const effectivePkg = recording.meta.app_package;
     const res = await api('POST', '/record', {
       path: filePath || '/work/new-recording.urf.json',
-      package: pkg,
+      package: effectivePkg,
       device: recording.meta?.device || '',
     });
     if (res.ok) {
@@ -1561,6 +1666,181 @@ function stopStatusPoll() {
   if (statusPollTimer) { clearInterval(statusPollTimer); statusPollTimer = null; }
 }
 
+// ============================================================
+// REALTIME VIEW
+// ============================================================
+let realtimeActive = false;
+let realtimeTimer = null;
+let screenElements = [];
+let screenNaturalW = 0;
+let screenNaturalH = 0;
+
+function toggleRealtime() {
+  realtimeActive = !realtimeActive;
+  const panel = document.getElementById('realtimePanel');
+  const detail = document.getElementById('detailPanel');
+  const btn = document.getElementById('btnRealtime');
+
+  if (realtimeActive) {
+    panel.style.display = 'flex';
+    detail.style.display = 'none';
+    btn.classList.add('btn-realtime-on');
+    captureScreen();
+    startRealtimeRefresh();
+  } else {
+    panel.style.display = 'none';
+    detail.style.display = '';
+    btn.classList.remove('btn-realtime-on');
+    stopRealtimeRefresh();
+  }
+}
+
+function startRealtimeRefresh() {
+  stopRealtimeRefresh();
+  realtimeTimer = setInterval(() => {
+    if (document.getElementById('realtimeAuto')?.checked) {
+      captureScreen();
+    }
+  }, 3000);
+}
+
+function stopRealtimeRefresh() {
+  if (realtimeTimer) { clearInterval(realtimeTimer); realtimeTimer = null; }
+}
+
+let captureInFlight = false;
+async function captureScreen() {
+  if (captureInFlight) return;
+  captureInFlight = true;
+  const status = document.getElementById('realtimeStatus');
+  status.textContent = 'Capturing...';
+
+  try {
+    // Fetch screenshot and elements in parallel
+    const [imgResp, elData] = await Promise.all([
+      fetch('/api/screenshot').then(r => {
+        if (!r.ok) throw new Error('Screenshot failed');
+        return r.blob();
+      }),
+      fetch('/api/elements').then(r => r.json()),
+    ]);
+
+    // Display screenshot
+    const img = document.getElementById('screenImg');
+    const noScreen = document.getElementById('noScreen');
+    const url = URL.createObjectURL(imgResp);
+
+    img.onload = function() {
+      screenNaturalW = this.naturalWidth;
+      screenNaturalH = this.naturalHeight;
+      noScreen.style.display = 'none';
+      img.style.display = 'block';
+      renderElementOverlays(elData.elements || []);
+    };
+    img.src = url;
+
+    screenElements = elData.elements || [];
+    renderElementList(screenElements);
+
+    const count = screenElements.length;
+    const clickable = screenElements.filter(e => e.clickable || e.text || e.resource_id).length;
+    status.textContent = count + ' elements (' + clickable + ' interactive) | ' + new Date().toLocaleTimeString();
+  } catch (e) {
+    status.textContent = 'Error: ' + e.message;
+  } finally {
+    captureInFlight = false;
+  }
+}
+
+function renderElementOverlays(elements) {
+  const img = document.getElementById('screenImg');
+  const container = document.getElementById('elementOverlays');
+  container.innerHTML = '';
+
+  if (!screenNaturalW || !screenNaturalH) return;
+
+  const displayW = img.clientWidth;
+  const displayH = img.clientHeight;
+  const scaleX = displayW / screenNaturalW;
+  const scaleY = displayH / screenNaturalH;
+
+  elements.forEach((el, idx) => {
+    if (!el.bounds || el.bounds.length < 4) return;
+    const [x1, y1, x2, y2] = el.bounds;
+    const w = x2 - x1;
+    const h = y2 - y1;
+    if (w <= 0 || h <= 0) return;
+    // Skip near-full-screen elements (layout containers)
+    if (w >= screenNaturalW * 0.95 && h >= screenNaturalH * 0.95) return;
+    // Only show clickable / labeled elements to reduce clutter
+    if (!el.clickable && !el.text && !el.resource_id) return;
+
+    const div = document.createElement('div');
+    div.className = 'element-overlay';
+    div.style.left = (x1 * scaleX) + 'px';
+    div.style.top = (y1 * scaleY) + 'px';
+    div.style.width = (w * scaleX) + 'px';
+    div.style.height = (h * scaleY) + 'px';
+
+    const label = el.text || (el.resource_id || '').split('/').pop() || '';
+    if (label) {
+      const lbl = document.createElement('span');
+      lbl.className = 'el-label';
+      lbl.textContent = label;
+      div.appendChild(lbl);
+    }
+
+    div.onclick = (e) => { e.stopPropagation(); addElementFrame(el); };
+    div.title = [el.resource_id, el.text, el.cls, '[' + el.bounds.join(',') + ']'].filter(Boolean).join('\n');
+
+    container.appendChild(div);
+  });
+}
+
+function renderElementList(elements) {
+  const panel = document.getElementById('elementListPanel');
+  const clickable = elements.filter(el => el.clickable || el.text || el.resource_id);
+
+  if (!clickable.length) {
+    panel.innerHTML = '<h4>Interactive Elements</h4><div style="color:var(--text2);padding:8px;font-size:12px">No interactive elements found</div>';
+    return;
+  }
+
+  let html = '<h4>Interactive Elements (' + clickable.length + ')</h4>';
+  html += clickable.map((el) => {
+    const globalIdx = elements.indexOf(el);
+    const rid = el.resource_id ? el.resource_id.split('/').pop() : '';
+    return '<div class="el-item" onclick="addElementFrame(screenElements[' + globalIdx + '])" title="' + esc(el.resource_id || '') + '">'
+      + (rid ? '<span class="el-id">' + esc(rid) + '</span> ' : '')
+      + (el.text ? '<span class="el-text">' + esc(el.text) + '</span> ' : '')
+      + '<span class="el-class">' + esc(el.cls.split('.').pop()) + '</span>'
+      + '</div>';
+  }).join('');
+  panel.innerHTML = html;
+}
+
+function addElementFrame(el) {
+  if (!recording) {
+    toast('Load or create a file first', 'error');
+    return;
+  }
+  const f = {
+    id: nextId(),
+    t: recording.frames.length ? recording.frames[recording.frames.length - 1].t + 1000 : 0,
+    type: 'element',
+    action: 'tap',
+    resource_id: el.resource_id || '',
+    text: el.text || '',
+    timeout: 10,
+    enabled: true,
+    note: '',
+  };
+  recording.frames.push(f);
+  selectedId = f.id;
+  refreshAll();
+  toast('Added element: ' + (el.text || (el.resource_id||'').split('/').pop() || 'element'), 'success');
+}
+
 // INIT
 loadFileList();
 </script>
@@ -1592,6 +1872,10 @@ class EditorHandler(BaseHTTPRequestHandler):
             self._json(self._load_file(fp))
         elif path == "/api/status":
             self._json(_proc_manager.get_status_dict())
+        elif path == "/api/screenshot":
+            self._capture_screen(params)
+        elif path == "/api/elements":
+            self._json(self._capture_elements(params))
         else:
             self._error(404, "Not Found")
 
@@ -1740,6 +2024,91 @@ class EditorHandler(BaseHTTPRequestHandler):
         if not output_path:
             output_path = str(Path(self.work_dir) / "new-recording.urf.json")
         return _proc_manager.start_record(output_path, package, device, self.work_dir)
+
+    def _capture_screen(self, params: dict) -> None:
+        """Capture device screen via ADB and return as PNG."""
+        serial = params.get("serial", [""])[0]
+        try:
+            prefix = ["adb", "-s", serial] if serial else ["adb"]
+            result = subprocess.run(
+                prefix + ["exec-out", "screencap", "-p"],
+                capture_output=True,
+                timeout=10,
+            )
+            if result.returncode != 0 or not result.stdout:
+                self._json({"error": "Screenshot capture failed"})
+                return
+            data = result.stdout
+            self.send_response(200)
+            self.send_header("Content-Type", "image/png")
+            self.send_header("Content-Length", str(len(data)))
+            self.send_header("Cache-Control", "no-cache")
+            self.send_header("Access-Control-Allow-Origin", "*")
+            self.end_headers()
+            self.wfile.write(data)
+        except subprocess.TimeoutExpired:
+            self._json({"error": "Screenshot timed out"})
+        except FileNotFoundError:
+            self._json({"error": "ADB not found"})
+        except Exception as e:
+            self._json({"error": str(e)})
+
+    def _capture_elements(self, params: dict) -> dict:
+        """Capture UI hierarchy via ADB and return parsed elements."""
+        serial = params.get("serial", [""])[0]
+        try:
+            prefix = ["adb", "-s", serial] if serial else ["adb"]
+            remote = "/sdcard/window_dump.xml"
+
+            # Dump UI hierarchy on device
+            subprocess.run(
+                prefix + ["shell", "uiautomator", "dump", remote],
+                capture_output=True, text=True, timeout=15,
+            )
+
+            # Read XML directly via exec-out (avoids needing adb pull)
+            r2 = subprocess.run(
+                prefix + ["exec-out", "cat", remote],
+                capture_output=True, text=True, timeout=10,
+            )
+
+            if r2.returncode != 0 or not r2.stdout.strip():
+                return {"error": "UI dump failed", "elements": []}
+
+            # Parse XML
+            root = _ET.fromstring(r2.stdout)
+            elements: list = []
+            bounds_pat = _re.compile(r"\[(\d+),(\d+)\]\[(\d+),(\d+)\]")
+
+            def walk(node: _ET.Element) -> None:
+                if node.tag == "node":
+                    attrs = node.attrib
+                    bounds_raw = attrs.get("bounds", "")
+                    match = bounds_pat.match(bounds_raw)
+                    if match:
+                        x1, y1, x2, y2 = map(int, match.groups())
+                        elements.append({
+                            "resource_id": attrs.get("resource-id", ""),
+                            "text": attrs.get("text", ""),
+                            "cls": attrs.get("class", ""),
+                            "bounds": [x1, y1, x2, y2],
+                            "center": [(x1 + x2) // 2, (y1 + y2) // 2],
+                            "clickable": attrs.get("clickable") == "true",
+                            "enabled": attrs.get("enabled") == "true",
+                        })
+                for child in node:
+                    walk(child)
+
+            walk(root)
+            return {"elements": elements}
+        except _ET.ParseError as e:
+            return {"error": f"XML parse error: {e}", "elements": []}
+        except subprocess.TimeoutExpired:
+            return {"error": "UI dump timed out", "elements": []}
+        except FileNotFoundError:
+            return {"error": "ADB not found", "elements": []}
+        except Exception as e:
+            return {"error": str(e), "elements": []}
 
     def _hover_log(self, body: dict) -> dict:
         """Print hover details to terminal for quick inspection while editing."""
