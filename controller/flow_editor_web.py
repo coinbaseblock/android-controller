@@ -34,6 +34,7 @@ import signal
 import subprocess
 import sys
 import threading
+import time
 import argparse
 import xml.etree.ElementTree as _ET
 from http.server import HTTPServer, BaseHTTPRequestHandler
@@ -90,7 +91,15 @@ class ProcessManager:
             if self._proc and self._proc.poll() is None:
                 return {"ok": False, "error": "Process already running"}
 
+            # Resolve player script path (handle underscore vs hyphen naming)
             script = str(Path(__file__).parent / "universal_player.py")
+            if not Path(script).exists():
+                alt = str(Path(__file__).parent / "universal-player.py")
+                if Path(alt).exists():
+                    script = alt
+                else:
+                    return {"ok": False, "error": "Player script not found"}
+
             cmd = [sys.executable, script, recording_path, "--replay-mode", "auto"]
 
             try:
@@ -117,7 +126,31 @@ class ProcessManager:
             if self._proc and self._proc.poll() is None:
                 return {"ok": False, "error": "Process already running"}
 
+            # Pre-flight: verify ADB connectivity and device presence
+            try:
+                prefix = ["adb", "-s", device] if device else ["adb"]
+                chk = subprocess.run(
+                    prefix + ["get-state"],
+                    capture_output=True, text=True, timeout=5,
+                )
+                state = chk.stdout.strip()
+                if chk.returncode != 0 or "device" not in state:
+                    stderr_hint = chk.stderr.strip()[:200] if chk.stderr else ""
+                    return {"ok": False, "error": f"No Android device connected (state={state}). {stderr_hint}".strip()}
+            except FileNotFoundError:
+                return {"ok": False, "error": "ADB not found in PATH"}
+            except subprocess.TimeoutExpired:
+                return {"ok": False, "error": "ADB timed out - check connection"}
+
+            # Resolve recorder script path (handle underscore vs hyphen naming)
             script = str(Path(__file__).parent / "universal_recorder.py")
+            if not Path(script).exists():
+                alt = str(Path(__file__).parent / "universal-recorder.py")
+                if Path(alt).exists():
+                    script = alt
+                else:
+                    return {"ok": False, "error": "Recorder script not found"}
+
             cmd = [
                 sys.executable, script,
                 "--mode", "raw",
@@ -142,11 +175,21 @@ class ProcessManager:
                 self._frames_count = 0
                 self._message = ""
                 self._start_monitor()
-                return {"ok": True}
             except Exception as e:
                 self._status = "error"
                 self._message = str(e)
                 return {"ok": False, "error": str(e)}
+
+        # Brief check outside lock: verify process survived startup
+        time.sleep(0.5)
+        with self._lock:
+            if self._proc and self._proc.poll() is not None:
+                err_msg = self._message or "Recording process exited immediately"
+                self._status = "idle"
+                self._proc = None
+                return {"ok": False, "error": err_msg}
+
+        return {"ok": True}
 
     def stop(self) -> dict:
         with self._lock:
@@ -247,7 +290,7 @@ input:focus, select:focus, textarea:focus { outline: none; border-color: var(--b
 .sidebar { width: 280px; background: var(--bg2); border-right: 1px solid var(--border); display: flex; flex-direction: column; flex-shrink: 0; overflow: hidden; }
 .content { flex: 1; display: flex; flex-direction: column; overflow: hidden; }
 .timeline { flex: 1; overflow-y: auto; padding: 12px; }
-.detail-panel { width: 340px; background: var(--bg2); border-left: 1px solid var(--border); overflow-y: auto; flex-shrink: 0; }
+/* detail-panel styles now in .detail-section and .right-panel */
 
 /* === BUTTONS === */
 .btn { padding: 5px 14px; border: 1px solid var(--border); border-radius: 6px; font-size: 13px; font-weight: 500; background: var(--bg3); color: var(--text); transition: all .15s; }
@@ -325,7 +368,7 @@ input:focus, select:focus, textarea:focus { outline: none; border-color: var(--b
 .drop-indicator { height: 3px; background: var(--blue); border-radius: 2px; margin: 2px 0; }
 
 /* === DETAIL PANEL === */
-.detail-panel { padding: 0; }
+/* detail-panel padding now handled by .detail-section */
 .detail-header { padding: 12px; border-bottom: 1px solid var(--border); display: flex; align-items: center; gap: 8px; }
 .detail-header h3 { font-size: 14px; flex: 1; }
 .detail-body { padding: 12px; }
@@ -447,35 +490,97 @@ input:focus, select:focus, textarea:focus { outline: none; border-color: var(--b
 ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 4px; }
 ::-webkit-scrollbar-thumb:hover { background: var(--text2); }
 
-/* === REALTIME PANEL === */
-.realtime-panel {
-  width: 380px; background: var(--bg2); border-left: 1px solid var(--border);
+/* === RIGHT PANEL (Device + Detail) === */
+.right-panel {
+  width: 370px; background: var(--bg2); border-left: 1px solid var(--border);
   display: flex; flex-direction: column; flex-shrink: 0; overflow: hidden;
 }
-.realtime-header {
-  padding: 10px 12px; border-bottom: 1px solid var(--border);
-  display: flex; align-items: center; gap: 8px;
+.right-panel-tabs {
+  display: flex; border-bottom: 1px solid var(--border); flex-shrink: 0;
 }
-.realtime-header h3 { font-size: 13px; flex: 1; white-space: nowrap; }
-.realtime-controls { display: flex; align-items: center; gap: 6px; font-size: 12px; }
-.screen-wrapper {
+.right-panel-tab {
+  flex: 1; padding: 8px 12px; font-size: 12px; font-weight: 600;
+  text-align: center; cursor: pointer; border: none;
+  background: var(--bg3); color: var(--text2); transition: all .15s;
+  text-transform: uppercase; letter-spacing: .5px;
+}
+.right-panel-tab:hover { color: var(--text); }
+.right-panel-tab.active { background: var(--bg2); color: var(--blue); border-bottom: 2px solid var(--blue); }
+.right-tab-content { display: none; flex-direction: column; flex: 1; overflow: hidden; }
+.right-tab-content.active { display: flex; }
+
+/* Device tab */
+.device-section { display: flex; flex-direction: column; flex: 1; overflow-y: auto; }
+.device-header {
+  padding: 8px 12px; border-bottom: 1px solid var(--border);
+  display: flex; align-items: center; gap: 8px; flex-shrink: 0;
+}
+.device-header h3 { font-size: 13px; flex: 1; white-space: nowrap; }
+.device-controls { display: flex; align-items: center; gap: 6px; font-size: 12px; }
+.screen-container {
   position: relative; overflow: hidden; flex-shrink: 0; background: #000;
+  cursor: crosshair;
 }
-.screen-wrapper img { width: 100%; display: block; }
-.element-overlay {
+.screen-container img { width: 100%; display: block; }
+.screen-container .element-overlay {
   position: absolute; border: 1.5px solid var(--blue);
   background: rgba(88,166,255,0.08); cursor: pointer;
   transition: background .15s; z-index: 10;
 }
-.element-overlay:hover {
+.screen-container .element-overlay:hover {
   background: rgba(88,166,255,0.25); border-color: #fff; z-index: 11;
 }
-.element-overlay .el-label {
+.screen-container .element-overlay .el-label {
   position: absolute; bottom: -1px; left: 0; font-size: 8px;
   background: var(--blue); color: #000; padding: 0 3px;
   white-space: nowrap; max-width: 100%; overflow: hidden;
   text-overflow: ellipsis; pointer-events: none; line-height: 1.4;
 }
+.touch-feedback {
+  position: absolute; width: 30px; height: 30px; border-radius: 50%;
+  border: 2px solid var(--blue); background: rgba(88,166,255,0.3);
+  pointer-events: none; transform: translate(-50%, -50%);
+  animation: touchPulse 0.5s ease-out forwards; z-index: 50;
+}
+@keyframes touchPulse {
+  0% { transform: translate(-50%, -50%) scale(0.5); opacity: 1; }
+  100% { transform: translate(-50%, -50%) scale(1.5); opacity: 0; }
+}
+.swipe-line {
+  position: absolute; pointer-events: none; z-index: 50;
+  border: 2px dashed var(--green); opacity: 0.8;
+}
+.nav-bar {
+  display: flex; justify-content: center; gap: 20px; padding: 10px;
+  background: var(--bg3); border-top: 1px solid var(--border);
+  border-bottom: 1px solid var(--border); flex-shrink: 0;
+}
+.nav-btn {
+  width: 42px; height: 42px; border: 1px solid var(--border); border-radius: 50%;
+  background: var(--bg2); color: var(--text); font-size: 18px; cursor: pointer;
+  display: flex; align-items: center; justify-content: center; transition: all .15s;
+}
+.nav-btn:hover { background: var(--bg3); border-color: var(--text2); }
+.nav-btn:active { transform: scale(0.88); background: var(--blue); color: #fff; }
+.quick-controls {
+  padding: 8px 10px; display: flex; gap: 6px; flex-shrink: 0;
+  border-bottom: 1px solid var(--border);
+}
+.quick-controls input { flex: 1; }
+.extra-controls {
+  padding: 6px 10px; display: flex; gap: 4px; flex-wrap: wrap; flex-shrink: 0;
+  border-bottom: 1px solid var(--border);
+}
+.device-status {
+  padding: 5px 12px; font-size: 11px; color: var(--text2);
+  text-align: center; flex-shrink: 0; border-top: 1px solid var(--border);
+}
+.no-screen {
+  color: var(--text2); padding: 40px 20px; text-align: center;
+  border: 2px dashed var(--border); border-radius: 8px; margin: 12px;
+}
+
+/* Element list in device panel */
 .element-list-panel { flex: 1; overflow-y: auto; padding: 8px; }
 .element-list-panel h4 {
   font-size: 11px; text-transform: uppercase; letter-spacing: .5px;
@@ -489,15 +594,10 @@ input:focus, select:focus, textarea:focus { outline: none; border-color: var(--b
 .el-item .el-id { color: var(--blue); font-weight: 600; }
 .el-item .el-text { color: var(--text); }
 .el-item .el-class { color: var(--text2); font-size: 10px; }
-.realtime-status {
-  padding: 6px 12px; font-size: 11px; color: var(--text2);
-  border-top: 1px solid var(--border); text-align: center; flex-shrink: 0;
-}
-.no-screen {
-  color: var(--text2); padding: 40px 20px; text-align: center;
-  border: 2px dashed var(--border); border-radius: 8px; margin: 12px;
-}
-.btn-realtime-on { background: #1f6feb !important; border-color: #1f6feb !important; color: #fff !important; }
+
+/* Detail tab */
+.detail-section { display: flex; flex-direction: column; flex: 1; overflow-y: auto; }
+/* btn-realtime-on removed - device panel is always visible */
 </style>
 </head>
 <body>
@@ -533,8 +633,6 @@ input:focus, select:focus, textarea:focus { outline: none; border-color: var(--b
     <button class="btn btn-sm btn-primary" onclick="saveFile()">Save</button>
     <button class="btn btn-sm" onclick="saveAsFile()">Save As</button>
     <button class="btn btn-sm" onclick="exportScript()">Export Script</button>
-    <div class="sep" style="width:1px;height:24px;background:var(--border);margin:0 4px"></div>
-    <button class="btn btn-sm" id="btnRealtime" onclick="toggleRealtime()">Realtime</button>
   </div>
 
   <div class="main">
@@ -615,41 +713,79 @@ input:focus, select:focus, textarea:focus { outline: none; border-color: var(--b
       <div class="timeline" id="timeline" data-hover-scope="timeline"></div>
     </div>
 
-    <!-- DETAIL PANEL -->
-    <div class="detail-panel" id="detailPanel" data-hover-scope="detail">
-      <div class="detail-header">
-        <h3>Frame Detail</h3>
-        <button class="btn btn-sm" onclick="closeDetail()">Close</button>
+    <!-- RIGHT PANEL: Device + Detail -->
+    <div class="right-panel" id="rightPanel">
+      <div class="right-panel-tabs">
+        <button class="right-panel-tab active" data-tab="device" onclick="switchRightTab('device',this)">Device</button>
+        <button class="right-panel-tab" data-tab="detail" onclick="switchRightTab('detail',this)">Detail</button>
+        <button class="right-panel-tab" data-tab="elements" onclick="switchRightTab('elements',this)">Elements</button>
       </div>
-      <div class="detail-body" id="detailBody">
-        <p style="color:var(--text2)">Select a frame to edit</p>
-      </div>
-    </div>
 
-    <!-- REALTIME PANEL -->
-    <div class="realtime-panel" id="realtimePanel" style="display:none">
-      <div class="realtime-header">
-        <h3>Device Realtime</h3>
-        <div class="realtime-controls">
-          <label style="font-size:11px;display:flex;align-items:center;gap:4px">
-            <input type="checkbox" id="realtimeAuto" style="width:auto"> Auto
-          </label>
-          <button class="btn btn-sm" onclick="captureScreen()">Capture</button>
-          <button class="btn btn-sm" onclick="toggleRealtime()">Close</button>
+      <!-- Device Tab -->
+      <div class="right-tab-content active" id="tabDevice">
+        <div class="device-section">
+          <div class="device-header">
+            <h3>Screen</h3>
+            <div class="device-controls">
+              <label style="font-size:11px;display:flex;align-items:center;gap:4px">
+                <input type="checkbox" id="autoRefresh" checked style="width:auto"> Auto
+              </label>
+              <button class="btn btn-sm" onclick="captureScreen()">Refresh</button>
+            </div>
+          </div>
+          <div class="screen-container" id="screenContainer">
+            <div class="no-screen" id="noScreen">Connecting to device...</div>
+            <img id="screenImg" style="display:none" alt="Device Screen">
+            <div id="elementOverlays" style="position:absolute;top:0;left:0;width:100%;height:100%;pointer-events:none"></div>
+          </div>
+          <!-- Navigation Bar -->
+          <div class="nav-bar">
+            <button class="nav-btn" onclick="sendKey(4)" title="Back">&#9665;</button>
+            <button class="nav-btn" onclick="sendKey(3)" title="Home">&#9711;</button>
+            <button class="nav-btn" onclick="sendKey(187)" title="Recent Apps">&#9634;</button>
+            <button class="nav-btn" onclick="sendKey(26)" title="Power" style="font-size:14px">&#9211;</button>
+          </div>
+          <!-- Text Input -->
+          <div class="quick-controls">
+            <input type="text" id="textInput" placeholder="Type text and press Enter..." onkeydown="if(event.key==='Enter'){sendText();event.preventDefault();}">
+            <button class="btn btn-sm" onclick="sendText()">Send</button>
+          </div>
+          <!-- Extra Controls -->
+          <div class="extra-controls">
+            <button class="btn btn-sm" onclick="sendKey(24)" title="Volume Up">Vol+</button>
+            <button class="btn btn-sm" onclick="sendKey(25)" title="Volume Down">Vol-</button>
+            <button class="btn btn-sm" onclick="sendKey(67)" title="Delete/Backspace">Del</button>
+            <button class="btn btn-sm" onclick="sendKey(61)" title="Tab">Tab</button>
+            <button class="btn btn-sm" onclick="sendKey(66)" title="Enter">Enter</button>
+            <button class="btn btn-sm" onclick="rotateScreen()" title="Rotate">Rotate</button>
+            <button class="btn btn-sm" onclick="sendKey(224)" title="Wake Up">Wake</button>
+          </div>
+          <div class="device-status" id="deviceStatus">Ready - tap screen to interact</div>
         </div>
       </div>
-      <div style="overflow-y:auto;flex:1">
-        <div class="screen-wrapper" id="screenWrapper">
-          <div class="no-screen" id="noScreen">Click "Capture" to see device screen</div>
-          <img id="screenImg" style="display:none" alt="Device Screen">
-          <div id="elementOverlays" style="position:absolute;top:0;left:0;width:100%;height:100%"></div>
+
+      <!-- Detail Tab -->
+      <div class="right-tab-content" id="tabDetail">
+        <div class="detail-section" data-hover-scope="detail">
+          <div class="detail-header" style="padding:12px;border-bottom:1px solid var(--border);display:flex;align-items:center;gap:8px">
+            <h3 style="font-size:14px;flex:1">Frame Detail</h3>
+          </div>
+          <div class="detail-body" id="detailBody" style="padding:12px">
+            <p style="color:var(--text2)">Select a frame to edit</p>
+          </div>
         </div>
-        <div class="element-list-panel" id="elementListPanel">
+      </div>
+
+      <!-- Elements Tab -->
+      <div class="right-tab-content" id="tabElements">
+        <div style="padding:8px;border-bottom:1px solid var(--border);flex-shrink:0">
+          <button class="btn btn-sm btn-blue" onclick="captureScreenWithElements()" style="width:100%">Scan Elements</button>
+        </div>
+        <div class="element-list-panel" id="elementListPanel" style="flex:1;overflow-y:auto;padding:8px">
           <h4>Interactive Elements</h4>
-          <div style="color:var(--text2);font-size:12px;padding:4px">Capture to see elements</div>
+          <div style="color:var(--text2);font-size:12px;padding:4px">Click "Scan Elements" to detect UI elements</div>
         </div>
       </div>
-      <div class="realtime-status" id="realtimeStatus">Ready</div>
     </div>
   </div>
 </div>
@@ -1159,7 +1295,12 @@ function renderDetail() {
 // ============================================================
 // ACTIONS
 // ============================================================
-function selectFrame(id) { selectedId = id; renderTimeline(); renderDetail(); }
+function selectFrame(id) {
+  selectedId = id; renderTimeline(); renderDetail();
+  // Auto-switch to Detail tab when a frame is selected
+  const detailTab = document.querySelector('.right-panel-tab[data-tab="detail"]');
+  if (detailTab) switchRightTab('detail', detailTab);
+}
 function closeDetail() { selectedId = -1; renderTimeline(); renderDetail(); }
 
 function updateFrameField(id, key, val) {
@@ -1678,56 +1819,78 @@ function stopStatusPoll() {
 }
 
 // ============================================================
-// REALTIME VIEW
+// RIGHT PANEL TABS
 // ============================================================
-let realtimeActive = false;
-let realtimeTimer = null;
+function switchRightTab(tabName, btn) {
+  document.querySelectorAll('.right-panel-tab').forEach(t => t.classList.remove('active'));
+  document.querySelectorAll('.right-tab-content').forEach(c => c.classList.remove('active'));
+  btn.classList.add('active');
+  const tabEl = document.getElementById('tab' + tabName.charAt(0).toUpperCase() + tabName.slice(1));
+  if (tabEl) tabEl.classList.add('active');
+}
+
+// ============================================================
+// DEVICE SCREEN & CONTROLS
+// ============================================================
 let screenElements = [];
 let screenNaturalW = 0;
 let screenNaturalH = 0;
+let screenRefreshTimer = null;
+let captureInFlight = false;
 
-function toggleRealtime() {
-  realtimeActive = !realtimeActive;
-  const panel = document.getElementById('realtimePanel');
-  const detail = document.getElementById('detailPanel');
-  const btn = document.getElementById('btnRealtime');
-
-  if (realtimeActive) {
-    panel.style.display = 'flex';
-    detail.style.display = 'none';
-    btn.classList.add('btn-realtime-on');
-    captureScreen();
-    startRealtimeRefresh();
-  } else {
-    panel.style.display = 'none';
-    detail.style.display = '';
-    btn.classList.remove('btn-realtime-on');
-    stopRealtimeRefresh();
-  }
-}
-
-function startRealtimeRefresh() {
-  stopRealtimeRefresh();
-  realtimeTimer = setInterval(() => {
-    if (document.getElementById('realtimeAuto')?.checked) {
+// Screen auto-refresh
+function startScreenRefresh() {
+  stopScreenRefresh();
+  screenRefreshTimer = setInterval(() => {
+    if (document.getElementById('autoRefresh')?.checked) {
       captureScreen();
     }
-  }, 3000);
+  }, 2000);
 }
 
-function stopRealtimeRefresh() {
-  if (realtimeTimer) { clearInterval(realtimeTimer); realtimeTimer = null; }
+function stopScreenRefresh() {
+  if (screenRefreshTimer) { clearInterval(screenRefreshTimer); screenRefreshTimer = null; }
 }
 
-let captureInFlight = false;
 async function captureScreen() {
   if (captureInFlight) return;
   captureInFlight = true;
-  const status = document.getElementById('realtimeStatus');
+  const status = document.getElementById('deviceStatus');
   status.textContent = 'Capturing...';
 
   try {
-    // Fetch screenshot and elements in parallel
+    // Fetch screenshot (elements are fetched separately on demand)
+    const imgResp = await fetch('/api/screenshot');
+    if (!imgResp.ok) throw new Error('Screenshot failed');
+    const blob = await imgResp.blob();
+
+    const img = document.getElementById('screenImg');
+    const noScreen = document.getElementById('noScreen');
+    const url = URL.createObjectURL(blob);
+
+    img.onload = function() {
+      screenNaturalW = this.naturalWidth;
+      screenNaturalH = this.naturalHeight;
+      noScreen.style.display = 'none';
+      img.style.display = 'block';
+      URL.revokeObjectURL(url);
+    };
+    img.src = url;
+    status.textContent = 'Screen updated | ' + new Date().toLocaleTimeString();
+  } catch (e) {
+    status.textContent = 'Error: ' + e.message;
+  } finally {
+    captureInFlight = false;
+  }
+}
+
+async function captureScreenWithElements() {
+  if (captureInFlight) return;
+  captureInFlight = true;
+  const status = document.getElementById('deviceStatus');
+  status.textContent = 'Capturing screen + elements...';
+
+  try {
     const [imgResp, elData] = await Promise.all([
       fetch('/api/screenshot').then(r => {
         if (!r.ok) throw new Error('Screenshot failed');
@@ -1736,7 +1899,6 @@ async function captureScreen() {
       fetch('/api/elements').then(r => r.json()),
     ]);
 
-    // Display screenshot
     const img = document.getElementById('screenImg');
     const noScreen = document.getElementById('noScreen');
     const url = URL.createObjectURL(imgResp);
@@ -1747,6 +1909,7 @@ async function captureScreen() {
       noScreen.style.display = 'none';
       img.style.display = 'block';
       renderElementOverlays(elData.elements || []);
+      URL.revokeObjectURL(url);
     };
     img.src = url;
 
@@ -1781,9 +1944,7 @@ function renderElementOverlays(elements) {
     const w = x2 - x1;
     const h = y2 - y1;
     if (w <= 0 || h <= 0) return;
-    // Skip near-full-screen elements (layout containers)
     if (w >= screenNaturalW * 0.95 && h >= screenNaturalH * 0.95) return;
-    // Only show clickable / labeled elements to reduce clutter
     if (!el.clickable && !el.text && !el.resource_id) return;
 
     const div = document.createElement('div');
@@ -1792,6 +1953,7 @@ function renderElementOverlays(elements) {
     div.style.top = (y1 * scaleY) + 'px';
     div.style.width = (w * scaleX) + 'px';
     div.style.height = (h * scaleY) + 'px';
+    div.style.pointerEvents = 'auto';
 
     const label = el.text || (el.resource_id || '').split('/').pop() || '';
     if (label) {
@@ -1852,8 +2014,168 @@ function addElementFrame(el) {
   toast('Added element: ' + (el.text || (el.resource_id||'').split('/').pop() || 'element'), 'success');
 }
 
+// ============================================================
+// SCREEN TOUCH INTERACTION (tap & swipe)
+// ============================================================
+let touchStartPos = null;
+let touchStartTime = 0;
+
+function initScreenTouch() {
+  const container = document.getElementById('screenContainer');
+  if (!container) return;
+
+  container.addEventListener('mousedown', (e) => {
+    if (e.target.classList.contains('element-overlay')) return;
+    const rect = container.getBoundingClientRect();
+    touchStartPos = { x: e.clientX - rect.left, y: e.clientY - rect.top };
+    touchStartTime = Date.now();
+    e.preventDefault();
+  });
+
+  container.addEventListener('mouseup', async (e) => {
+    if (!touchStartPos) return;
+    const rect = container.getBoundingClientRect();
+    const endPos = { x: e.clientX - rect.left, y: e.clientY - rect.top };
+    const elapsed = Date.now() - touchStartTime;
+
+    const img = document.getElementById('screenImg');
+    if (!img || !screenNaturalW || !screenNaturalH) { touchStartPos = null; return; }
+
+    const displayW = img.clientWidth;
+    const displayH = img.clientHeight;
+
+    // Convert display coordinates to device coordinates
+    const startX = Math.round(touchStartPos.x / displayW * screenNaturalW);
+    const startY = Math.round(touchStartPos.y / displayH * screenNaturalH);
+    const endX = Math.round(endPos.x / displayW * screenNaturalW);
+    const endY = Math.round(endPos.y / displayH * screenNaturalH);
+
+    const dx = endPos.x - touchStartPos.x;
+    const dy = endPos.y - touchStartPos.y;
+    const dist = Math.sqrt(dx * dx + dy * dy);
+
+    // Show visual touch feedback
+    showTouchFeedback(touchStartPos.x, touchStartPos.y);
+
+    if (dist < 10) {
+      // Tap
+      const status = document.getElementById('deviceStatus');
+      status.textContent = 'Tap: (' + startX + ', ' + startY + ')...';
+      try {
+        const res = await api('POST', '/tap', { x: startX, y: startY });
+        if (res.ok) {
+          status.textContent = 'Tapped (' + startX + ', ' + startY + ')';
+          // Refresh screen after tap
+          setTimeout(captureScreen, 500);
+        } else {
+          status.textContent = 'Tap failed: ' + (res.error || '');
+        }
+      } catch (err) {
+        status.textContent = 'Tap error: ' + err.message;
+      }
+    } else {
+      // Swipe
+      const duration = Math.max(150, Math.min(elapsed, 1500));
+      const status = document.getElementById('deviceStatus');
+      status.textContent = 'Swipe: (' + startX + ',' + startY + ') -> (' + endX + ',' + endY + ')...';
+      try {
+        const res = await api('POST', '/swipe', { x1: startX, y1: startY, x2: endX, y2: endY, duration: duration });
+        if (res.ok) {
+          status.textContent = 'Swiped (' + startX + ',' + startY + ') -> (' + endX + ',' + endY + ')';
+          setTimeout(captureScreen, 500);
+        } else {
+          status.textContent = 'Swipe failed: ' + (res.error || '');
+        }
+      } catch (err) {
+        status.textContent = 'Swipe error: ' + err.message;
+      }
+    }
+    touchStartPos = null;
+  });
+
+  container.addEventListener('mouseleave', () => { touchStartPos = null; });
+}
+
+function showTouchFeedback(x, y) {
+  const container = document.getElementById('screenContainer');
+  const fb = document.createElement('div');
+  fb.className = 'touch-feedback';
+  fb.style.left = x + 'px';
+  fb.style.top = y + 'px';
+  container.appendChild(fb);
+  setTimeout(() => fb.remove(), 600);
+}
+
+// ============================================================
+// DEVICE CONTROL COMMANDS
+// ============================================================
+async function sendKey(keycode) {
+  const status = document.getElementById('deviceStatus');
+  status.textContent = 'Sending key ' + keycode + '...';
+  try {
+    const res = await api('POST', '/key', { keycode: keycode });
+    if (res.ok) {
+      status.textContent = 'Key ' + keycode + ' sent';
+      setTimeout(captureScreen, 400);
+    } else {
+      status.textContent = 'Key failed: ' + (res.error || '');
+    }
+  } catch (e) {
+    status.textContent = 'Key error: ' + e.message;
+  }
+}
+
+async function sendText() {
+  const input = document.getElementById('textInput');
+  const text = input.value.trim();
+  if (!text) return;
+  const status = document.getElementById('deviceStatus');
+  status.textContent = 'Sending text...';
+  try {
+    const res = await api('POST', '/text', { text: text });
+    if (res.ok) {
+      status.textContent = 'Text sent: "' + text + '"';
+      input.value = '';
+      setTimeout(captureScreen, 400);
+    } else {
+      status.textContent = 'Text failed: ' + (res.error || '');
+    }
+  } catch (e) {
+    status.textContent = 'Text error: ' + e.message;
+  }
+}
+
+async function rotateScreen() {
+  const status = document.getElementById('deviceStatus');
+  status.textContent = 'Rotating...';
+  try {
+    // Toggle auto-rotate off, then rotate
+    const res = await api('POST', '/shell', { command: 'settings put system accelerometer_rotation 0' });
+    // Get current rotation
+    const r2 = await api('POST', '/shell', { command: 'settings get system user_rotation' });
+    const current = parseInt(r2.output?.trim()) || 0;
+    const next = (current + 1) % 4;
+    await api('POST', '/shell', { command: 'settings put system user_rotation ' + next });
+    status.textContent = 'Rotated to ' + (next * 90) + ' degrees';
+    setTimeout(captureScreen, 800);
+  } catch (e) {
+    status.textContent = 'Rotate error: ' + e.message;
+  }
+}
+
+// ============================================================
 // INIT
+// ============================================================
 loadFileList();
+
+// Initialize screen touch interaction
+initScreenTouch();
+
+// Start auto-refresh for device screen
+startScreenRefresh();
+
+// Initial screen capture
+setTimeout(captureScreen, 500);
 
 // Sync playback state with server on load
 (async function initPlaybackState() {
@@ -1868,11 +2190,9 @@ loadFileList();
       startElapsedTimer();
       startStatusPoll();
     } else {
-      // Ensure idle state - buttons enabled
       updatePlaybackUI('idle', null);
     }
   } catch (e) {
-    // Server unreachable - ensure buttons are enabled
     updatePlaybackUI('idle', null);
   }
 })();
@@ -1909,6 +2229,8 @@ class EditorHandler(BaseHTTPRequestHandler):
             self._capture_screen(params)
         elif path == "/api/elements":
             self._json(self._capture_elements(params))
+        elif path == "/api/devices":
+            self._json(self._check_devices())
         else:
             self._error(404, "Not Found")
 
@@ -1929,6 +2251,16 @@ class EditorHandler(BaseHTTPRequestHandler):
             self._json(self._start_record(body))
         elif path == "/api/stop":
             self._json(_proc_manager.stop())
+        elif path == "/api/tap":
+            self._json(self._device_tap(body))
+        elif path == "/api/swipe":
+            self._json(self._device_swipe(body))
+        elif path == "/api/key":
+            self._json(self._device_key(body))
+        elif path == "/api/text":
+            self._json(self._device_text(body))
+        elif path == "/api/shell":
+            self._json(self._device_shell(body))
         else:
             self._error(404, "Not Found")
 
@@ -2142,6 +2474,123 @@ class EditorHandler(BaseHTTPRequestHandler):
             return {"error": "ADB not found", "elements": []}
         except Exception as e:
             return {"error": str(e), "elements": []}
+
+    # ---------- Device control ----------
+
+    def _check_devices(self) -> dict:
+        """List connected ADB devices."""
+        try:
+            result = subprocess.run(
+                ["adb", "devices", "-l"],
+                capture_output=True, text=True, timeout=5,
+            )
+            lines = [l.strip() for l in result.stdout.strip().split("\n")[1:] if l.strip()]
+            devices = []
+            for line in lines:
+                parts = line.split()
+                if len(parts) >= 2 and parts[1] == "device":
+                    devices.append({"serial": parts[0], "info": " ".join(parts[2:])})
+            return {"ok": True, "devices": devices, "count": len(devices)}
+        except FileNotFoundError:
+            return {"ok": False, "error": "ADB not found", "devices": [], "count": 0}
+        except subprocess.TimeoutExpired:
+            return {"ok": False, "error": "ADB timed out", "devices": [], "count": 0}
+        except Exception as e:
+            return {"ok": False, "error": str(e), "devices": [], "count": 0}
+
+    def _device_tap(self, body: dict) -> dict:
+        """Send tap event to device via ADB."""
+        x = int(body.get("x", 0))
+        y = int(body.get("y", 0))
+        serial = body.get("serial", "")
+        try:
+            prefix = ["adb", "-s", serial] if serial else ["adb"]
+            result = subprocess.run(
+                prefix + ["shell", "input", "tap", str(x), str(y)],
+                capture_output=True, text=True, timeout=10,
+            )
+            if result.returncode != 0:
+                return {"ok": False, "error": result.stderr.strip()[:200]}
+            return {"ok": True}
+        except Exception as e:
+            return {"ok": False, "error": str(e)}
+
+    def _device_swipe(self, body: dict) -> dict:
+        """Send swipe event to device via ADB."""
+        x1 = int(body.get("x1", 0))
+        y1 = int(body.get("y1", 0))
+        x2 = int(body.get("x2", 0))
+        y2 = int(body.get("y2", 0))
+        duration = int(body.get("duration", 300))
+        serial = body.get("serial", "")
+        try:
+            prefix = ["adb", "-s", serial] if serial else ["adb"]
+            result = subprocess.run(
+                prefix + ["shell", "input", "swipe", str(x1), str(y1), str(x2), str(y2), str(duration)],
+                capture_output=True, text=True, timeout=15,
+            )
+            if result.returncode != 0:
+                return {"ok": False, "error": result.stderr.strip()[:200]}
+            return {"ok": True}
+        except Exception as e:
+            return {"ok": False, "error": str(e)}
+
+    def _device_key(self, body: dict) -> dict:
+        """Send keyevent to device via ADB."""
+        keycode = body.get("keycode", "")
+        serial = body.get("serial", "")
+        if not keycode and keycode != 0:
+            return {"ok": False, "error": "No keycode specified"}
+        try:
+            prefix = ["adb", "-s", serial] if serial else ["adb"]
+            result = subprocess.run(
+                prefix + ["shell", "input", "keyevent", str(keycode)],
+                capture_output=True, text=True, timeout=10,
+            )
+            if result.returncode != 0:
+                return {"ok": False, "error": result.stderr.strip()[:200]}
+            return {"ok": True}
+        except Exception as e:
+            return {"ok": False, "error": str(e)}
+
+    def _device_text(self, body: dict) -> dict:
+        """Send text input to device via ADB."""
+        text = body.get("text", "")
+        serial = body.get("serial", "")
+        if not text:
+            return {"ok": False, "error": "No text specified"}
+        try:
+            prefix = ["adb", "-s", serial] if serial else ["adb"]
+            # adb shell input text requires escaping spaces as %s
+            escaped = text.replace(" ", "%s").replace("&", "\\&").replace(
+                "(", "\\(").replace(")", "\\)").replace("<", "\\<").replace(
+                ">", "\\>").replace("|", "\\|").replace(";", "\\;").replace(
+                "'", "\\'").replace('"', '\\"')
+            result = subprocess.run(
+                prefix + ["shell", "input", "text", escaped],
+                capture_output=True, text=True, timeout=10,
+            )
+            if result.returncode != 0:
+                return {"ok": False, "error": result.stderr.strip()[:200]}
+            return {"ok": True}
+        except Exception as e:
+            return {"ok": False, "error": str(e)}
+
+    def _device_shell(self, body: dict) -> dict:
+        """Run a shell command on device via ADB."""
+        command = body.get("command", "")
+        serial = body.get("serial", "")
+        if not command:
+            return {"ok": False, "error": "No command specified"}
+        try:
+            prefix = ["adb", "-s", serial] if serial else ["adb"]
+            result = subprocess.run(
+                prefix + ["shell"] + command.split(),
+                capture_output=True, text=True, timeout=15,
+            )
+            return {"ok": True, "output": result.stdout, "error": result.stderr}
+        except Exception as e:
+            return {"ok": False, "error": str(e)}
 
     def _hover_log(self, body: dict) -> dict:
         """Print hover details to terminal for quick inspection while editing."""
