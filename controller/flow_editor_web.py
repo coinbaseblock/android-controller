@@ -240,7 +240,7 @@ input:focus, select:focus, textarea:focus { outline: none; border-color: var(--b
 
 /* === LAYOUT === */
 .app { display: flex; flex-direction: column; height: 100vh; }
-.topbar { background: var(--bg2); border-bottom: 1px solid var(--border); padding: 8px 16px; display: flex; align-items: center; gap: 12px; flex-shrink: 0; }
+.topbar { background: var(--bg2); border-bottom: 1px solid var(--border); padding: 8px 16px; display: flex; align-items: center; gap: 12px; flex-shrink: 0; position: relative; z-index: 20; }
 .topbar h1 { font-size: 15px; font-weight: 600; white-space: nowrap; }
 .topbar .spacer { flex: 1; }
 .main { display: flex; flex: 1; overflow: hidden; }
@@ -364,26 +364,23 @@ input:focus, select:focus, textarea:focus { outline: none; border-color: var(--b
 
 /* === PLAY/REC CONTROLS === */
 .playback-controls { display: flex; align-items: center; gap: 8px; }
-.btn-play { background: #238636; border-color: #238636; color: #fff; display: inline-flex; align-items: center; gap: 6px; position: relative; overflow: hidden; transition: all .2s ease; }
+.btn-play { background: #238636; border-color: #238636; color: #fff; display: inline-flex; align-items: center; gap: 6px; position: relative; z-index: 1; pointer-events: auto; cursor: pointer; transition: all .2s ease; }
 .btn-play:hover { background: #2ea043; transform: scale(1.05); }
 .btn-play:active { transform: scale(0.95); }
+.btn-play:disabled { opacity: .4; cursor: not-allowed; transform: none; pointer-events: none; }
 .btn-play.active { background: #1a7f37; animation: pulse-green 1.5s ease-in-out infinite; }
 .btn-play.active .play-icon { animation: spin-play 1s linear infinite; }
-.btn-rec { background: #da3633; border-color: #da3633; color: #fff; display: inline-flex; align-items: center; gap: 6px; position: relative; overflow: hidden; transition: all .2s ease; }
+.btn-rec { background: #da3633; border-color: #da3633; color: #fff; display: inline-flex; align-items: center; gap: 6px; position: relative; z-index: 1; pointer-events: auto; cursor: pointer; transition: all .2s ease; }
 .btn-rec:hover { background: #f85149; transform: scale(1.05); }
 .btn-rec:active { transform: scale(0.95); }
+.btn-rec:disabled { opacity: .4; cursor: not-allowed; transform: none; pointer-events: none; }
 .btn-rec.active { background: #b62324; animation: pulse-red 1.5s ease-in-out infinite; border-color: #ff4444; }
-.btn-stop { background: #6e7681; border-color: #6e7681; color: #fff; display: inline-flex; align-items: center; gap: 6px; transition: all .2s ease; }
+.btn-stop { background: #6e7681; border-color: #6e7681; color: #fff; display: inline-flex; align-items: center; gap: 6px; position: relative; z-index: 1; pointer-events: auto; cursor: pointer; transition: all .2s ease; }
 .btn-stop:hover { background: #8b949e; transform: scale(1.05); }
 .btn-stop:active { transform: scale(0.95); }
-.btn-stop:disabled { opacity: .4; cursor: not-allowed; transform: none; }
+.btn-stop:disabled { opacity: .4; cursor: not-allowed; transform: none; pointer-events: none; }
 
-/* Ripple effect on click */
-.btn-play::after, .btn-rec::after, .btn-stop::after {
-  content: ''; position: absolute; inset: 0; background: radial-gradient(circle, rgba(255,255,255,.3) 10%, transparent 60%);
-  opacity: 0; transition: opacity .3s;
-}
-.btn-play:active::after, .btn-rec:active::after, .btn-stop:active::after { opacity: 1; }
+/* Visual feedback on click (no overlay blocking clicks) */
 
 .rec-dot { display: inline-block; width: 10px; height: 10px; border-radius: 50%; background: #ff4444; transition: all .2s; }
 .rec-dot.active { animation: blink-dot 1s ease-in-out infinite; box-shadow: 0 0 6px 2px rgba(255, 68, 68, 0.6); }
@@ -513,13 +510,13 @@ input:focus, select:focus, textarea:focus { outline: none; border-color: var(--b
     <div class="sep" style="width:1px;height:24px;background:var(--border);margin:0 4px"></div>
     <!-- Play/Rec Controls -->
     <div class="playback-controls">
-      <button class="btn btn-sm btn-play" id="btnPlay" onclick="startPlay()" title="Play recording">
+      <button type="button" class="btn btn-sm btn-play" id="btnPlay" title="Play recording">
         <span class="play-icon">&#9654;</span> Play
       </button>
-      <button class="btn btn-sm btn-rec" id="btnRec" onclick="startRecord()" title="Record touches">
+      <button type="button" class="btn btn-sm btn-rec" id="btnRec" title="Record touches">
         <span class="rec-dot" id="recDot"></span> Rec
       </button>
-      <button class="btn btn-sm btn-stop" id="btnStop" onclick="stopPlayback()" disabled title="Stop">
+      <button type="button" class="btn btn-sm btn-stop" id="btnStop" disabled title="Stop">
         &#9632; Stop
       </button>
     </div>
@@ -1000,6 +997,20 @@ function initHoverScopes() {
 
 // Init hover scopes after DOM is ready
 initHoverScopes();
+
+// Bind button events via addEventListener as fallback (in case inline onclick is blocked)
+document.getElementById('btnPlay').addEventListener('click', function(e) {
+  e.stopPropagation();
+  if (!this.disabled) startPlay();
+});
+document.getElementById('btnRec').addEventListener('click', function(e) {
+  e.stopPropagation();
+  if (!this.disabled) startRecord();
+});
+document.getElementById('btnStop').addEventListener('click', function(e) {
+  e.stopPropagation();
+  if (!this.disabled) stopPlayback();
+});
 
 function renderMeta() {
   if (!recording) return;
@@ -1843,6 +1854,28 @@ function addElementFrame(el) {
 
 // INIT
 loadFileList();
+
+// Sync playback state with server on load
+(async function initPlaybackState() {
+  try {
+    const res = await api('GET', '/status');
+    if (res.status === 'playing') {
+      updatePlaybackUI('playing', res);
+      startElapsedTimer();
+      startStatusPoll();
+    } else if (res.status === 'recording') {
+      updatePlaybackUI('recording', res);
+      startElapsedTimer();
+      startStatusPoll();
+    } else {
+      // Ensure idle state - buttons enabled
+      updatePlaybackUI('idle', null);
+    }
+  } catch (e) {
+    // Server unreachable - ensure buttons are enabled
+    updatePlaybackUI('idle', null);
+  }
+})();
 </script>
 </body>
 </html>"""
@@ -2141,6 +2174,7 @@ class EditorHandler(BaseHTTPRequestHandler):
         self.send_response(200)
         self.send_header("Content-Type", "text/html; charset=utf-8")
         self.send_header("Content-Length", str(len(data)))
+        self.send_header("Cache-Control", "no-cache, no-store, must-revalidate")
         self.end_headers()
         self.wfile.write(data)
 
