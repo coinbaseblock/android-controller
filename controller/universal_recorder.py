@@ -91,6 +91,7 @@ class UniversalRecorder:
 
         self._running = False
         self._start_time: float = 0
+        self._event_start_ts: Optional[float] = None
         self._screen_w = 1080
         self._screen_h = 2400
         self._input_max_x = 0
@@ -356,6 +357,18 @@ class UniversalRecorder:
     def _ms_since_start(self) -> int:
         return int((time.time() - self._start_time) * 1000)
 
+    def _ms_from_event_ts(self, timestamp_raw: str) -> int:
+        """Convert getevent timestamp to recording-relative milliseconds."""
+        try:
+            event_ts = float(timestamp_raw)
+        except (TypeError, ValueError):
+            return self._ms_since_start()
+
+        if self._event_start_ts is None:
+            self._event_start_ts = event_ts
+
+        return max(0, int((event_ts - self._event_start_ts) * 1000))
+
     def _add_frame(self, frame: Frame) -> Frame:
         with self._record_lock:
             return self.recording.add_frame(frame)
@@ -436,6 +449,7 @@ class UniversalRecorder:
         print(f"{'(with element annotation) ' if self.auto_annotate else ''}Press Ctrl+C to stop.\n")
 
         self._start_time = time.time()
+        self._event_start_ts = None
         self._running = True
         self._start_app_monitor()
 
@@ -474,6 +488,7 @@ class UniversalRecorder:
                 continue
 
             timestamp_raw, device, ev_type, code, value_hex = match.groups()
+            event_t = self._ms_from_event_ts(timestamp_raw)
 
             # Handle multi-touch slot and tracking ID
             if ev_type == "EV_ABS" and code in MULTITOUCH_CODES:
@@ -516,7 +531,7 @@ class UniversalRecorder:
                     key_name = KEY_NAMES.get(keycode, code)
                     frame = Frame(
                         id=self.recording.next_id(),
-                        t=self._ms_since_start(),
+                        t=event_t,
                         type="key",
                         keycode=keycode,
                         key_name=key_name,
@@ -543,7 +558,7 @@ class UniversalRecorder:
 
                     frame = Frame(
                         id=self.recording.next_id(),
-                        t=self._ms_since_start(),
+                        t=event_t,
                         type="touch",
                         action=action,
                         x=sx, y=sy,
@@ -564,7 +579,7 @@ class UniversalRecorder:
 
                     frame = Frame(
                         id=self.recording.next_id(),
-                        t=self._ms_since_start(),
+                        t=event_t,
                         type="touch",
                         action="up",
                         x=sx, y=sy,
