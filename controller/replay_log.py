@@ -317,19 +317,30 @@ def main() -> int:
 
     prefix = adb_prefix(args.serial)
     prev_end = None
+    cmd_overhead = 0.0  # Track adb command execution time to compensate
 
     print(f"Loaded {len(steps)} steps. Starting replay (speed={args.speed}, fixed_delay={args.fixed_delay}).")
 
     for idx, step in enumerate(steps, start=1):
         delay = compute_delay(prev_end, step.start_ts, args.speed, args.fixed_delay)
-        if delay > 0:
-            print(f"Waiting {delay:.3f}s before step {idx} ({step.label})...")
-            time.sleep(delay)
 
+        # Subtract the previous command's overhead from the delay so total
+        # wall-clock timing matches the original recording
+        adjusted_delay = max(0.0, delay - cmd_overhead)
+        if adjusted_delay > 0:
+            print(f"Waiting {adjusted_delay:.3f}s before step {idx} ({step.label}) [raw={delay:.3f}s, overhead={cmd_overhead:.3f}s]...")
+            time.sleep(adjusted_delay)
+        elif delay > 0:
+            print(f"Step {idx} ({step.label}): skipping wait (overhead {cmd_overhead:.3f}s >= delay {delay:.3f}s)")
+
+        cmd_start = time.monotonic()
         send_gesture(prefix, step, args.speed)
+        cmd_overhead = time.monotonic() - cmd_start
 
         if args.verify != "none":
+            verify_start = time.monotonic()
             capture_verification(prefix, args.verify, args.verify_dir, idx)
+            cmd_overhead += time.monotonic() - verify_start
 
         prev_end = step.end_ts
 

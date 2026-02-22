@@ -50,11 +50,13 @@ DISMISS_TEXTS = [
 class ElementInfo:
     resource_id: str = ""
     text: str = ""
+    content_desc: str = ""
     cls: str = ""
     bounds: Tuple[int, int, int, int] = (0, 0, 0, 0)
     center: Tuple[int, int] = (0, 0)
     clickable: bool = False
     enabled: bool = True
+    focusable: bool = False
     visible: bool = True
     index: int = 0
 
@@ -129,11 +131,13 @@ def parse_all_elements(xml_str: str) -> List[ElementInfo]:
             elements.append(ElementInfo(
                 resource_id=attrs.get("resource-id", ""),
                 text=attrs.get("text", ""),
+                content_desc=attrs.get("content-desc", ""),
                 cls=attrs.get("class", ""),
                 bounds=bounds,
                 center=(cx, cy),
                 clickable=attrs.get("clickable", "false") == "true",
                 enabled=attrs.get("enabled", "true") == "true",
+                focusable=attrs.get("focusable", "false") == "true",
                 visible=bounds != (0, 0, 0, 0),
                 index=idx,
             ))
