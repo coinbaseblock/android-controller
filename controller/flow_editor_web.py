@@ -509,6 +509,33 @@ input:focus, select:focus, textarea:focus { outline: none; border-color: var(--b
 .right-tab-content { display: none; flex-direction: column; flex: 1; overflow: hidden; }
 .right-tab-content.active { display: flex; }
 
+/* === INSPECT TOOLTIP (Ctrl+Hover) === */
+.inspect-tooltip {
+  position: absolute; z-index: 100; background: rgba(13,17,23,0.95);
+  border: 1px solid var(--blue); border-radius: 8px; padding: 10px 14px;
+  font-size: 11px; color: var(--text); max-width: 340px; pointer-events: none;
+  box-shadow: 0 4px 16px rgba(0,0,0,.5); backdrop-filter: blur(4px);
+  white-space: pre-wrap; word-break: break-all;
+}
+.inspect-tooltip .it-header { font-weight: 700; color: var(--blue); margin-bottom: 6px; font-size: 12px; }
+.inspect-tooltip .it-row { margin-bottom: 3px; line-height: 1.4; }
+.inspect-tooltip .it-label { color: var(--text2); }
+.inspect-tooltip .it-value { color: var(--text); font-family: monospace; font-size: 10px; }
+.inspect-tooltip .it-text { color: var(--green); font-weight: 600; }
+.inspect-highlight {
+  position: absolute; border: 2px solid var(--green); background: rgba(63,185,80,0.12);
+  pointer-events: none; z-index: 90; border-radius: 2px; transition: all .1s;
+}
+.rec-web-indicator {
+  display: inline-flex; align-items: center; gap: 4px; font-size: 10px;
+  background: rgba(218,54,51,.15); color: #f85149; padding: 2px 8px;
+  border-radius: 10px; font-weight: 600; margin-left: 4px;
+}
+.rec-web-indicator.mobile { background: rgba(63,185,80,.15); color: #3fb950; }
+
+/* Touch events for mobile browser */
+.screen-container { touch-action: none; }
+
 /* Device tab */
 .device-section { display: flex; flex-direction: column; flex: 1; overflow-y: auto; }
 .device-header {
@@ -818,6 +845,17 @@ let addSelectedType = '';
 let dragSrcIdx = -1;
 let lastHoverKey = '';
 let lastHoverAt = 0;
+
+// Web recording state (accurate timing from JS)
+let webRecording = false;
+let webRecStartTime = 0;
+let webRecFrameCount = 0;
+
+// Ctrl+hover inspect state
+let ctrlHeld = false;
+let inspectDebounceTimer = 0;
+let inspectTooltipEl = null;
+let inspectHighlightEls = [];
 
 const FRAME_TYPES = [
   {type:'gesture',  icon:'👆', name:'Gesture',    desc:'Tap / Swipe / Long Press'},
@@ -1734,8 +1772,8 @@ async function startRecord() {
     recording = {
       version: 2,
       meta: { name: 'New Recording', created: new Date().toISOString(), device: '',
-              screen_width: 1080, screen_height: 2400, app_package: pkg,
-              recording_mode: 'raw', total_duration_ms: 0 },
+              screen_width: screenNaturalW || 1080, screen_height: screenNaturalH || 2400,
+              app_package: pkg, recording_mode: 'mixed', total_duration_ms: 0 },
       settings: { loop: false, loop_count: 0, loop_delay: 5, speed: 1.0,
                   on_error: 'retry', max_retries: 3, retry_delay: 2.0,
                   screenshot_dir: '/img/captures',
@@ -1755,6 +1793,14 @@ async function startRecord() {
     recording.meta.app_package = p;
     document.getElementById('metaPkg').value = p;
   }
+
+  // Start web recording (accurate JS timing for web clicks)
+  webRecording = true;
+  webRecStartTime = Date.now();
+  webRecFrameCount = 0;
+
+  // Also start device getevent recording for mobile touches
+  let deviceRecOk = false;
   try {
     const effectivePkg = recording.meta.app_package;
     const res = await api('POST', '/record', {
@@ -1762,33 +1808,102 @@ async function startRecord() {
       package: effectivePkg,
       device: recording.meta?.device || '',
     });
-    if (res.ok) {
-      updatePlaybackUI('recording', {frames_count: 0});
-      startElapsedTimer();
-      toast('Recording started - interact with device', 'success');
-      startStatusPoll();
-    } else {
-      toast('Record failed: ' + (res.error || ''), 'error');
+    deviceRecOk = !!res.ok;
+    if (!deviceRecOk) {
+      // Device recording failed (no ADB etc) - continue with web-only recording
+      console.log('Device recording not available: ' + (res.error || ''));
     }
   } catch (e) {
-    toast('Record error: ' + e.message, 'error');
+    console.log('Device recording error: ' + e.message);
+  }
+
+  updatePlaybackUI('recording', {frames_count: 0});
+  startElapsedTimer();
+  startStatusPoll();
+
+  if (deviceRecOk) {
+    toast('Recording started - tap on screen or device', 'success');
+  } else {
+    toast('Recording started (web only) - tap on screen to record', 'success');
   }
 }
 
 async function stopPlayback() {
+  const wasWebRecording = webRecording;
+  const webFrames = wasWebRecording && recording ? [...recording.frames] : [];
+
+  // Stop web recording
+  webRecording = false;
+
+  // Update total duration from web frames
+  if (wasWebRecording && recording && recording.frames.length) {
+    recording.meta.total_duration_ms = Math.max(...recording.frames.map(f => f.t));
+  }
+
   try {
+    // Stop device recording subprocess
     const res = await api('POST', '/stop');
-    if (res.ok) {
-      updatePlaybackUI('idle', null);
+
+    if (wasWebRecording && recording) {
+      // Wait a moment for device recording file to be written
+      await new Promise(r => setTimeout(r, 800));
+
+      // Try to load device-recorded frames and merge with web frames
+      if (filePath) {
+        try {
+          const deviceData = await api('GET', '/load?path=' + encodeURIComponent(filePath));
+          if (deviceData && deviceData.frames && deviceData.frames.length) {
+            // Merge: device frames that are NOT duplicates of web frames
+            // (web frames from adb input tap also appear in getevent, skip those)
+            const webTimes = new Set(webFrames.map(f => f.t));
+            const deviceOnlyFrames = deviceData.frames.filter(f => {
+              // Keep device frames that don't overlap with web frame times (within 500ms tolerance)
+              if (f.type !== 'gesture' && f.type !== 'touch') return true;
+              for (const wt of webTimes) {
+                if (Math.abs(f.t - wt) < 500) return false;
+              }
+              return true;
+            });
+
+            if (deviceOnlyFrames.length) {
+              // Add device-only frames (mobile touches) to recording
+              let maxId = Math.max(0, ...recording.frames.map(f => f.id));
+              deviceOnlyFrames.forEach(df => {
+                df.id = ++maxId;
+                df.note = (df.note || '') + (df.note ? ' ' : '') + '[device]';
+                recording.frames.push(df);
+              });
+              // Sort all frames by time
+              recording.frames.sort((a, b) => a.t - b.t);
+              // Re-assign IDs in order
+              recording.frames.forEach((f, i) => f.id = i + 1);
+            }
+          }
+        } catch (mergeErr) {
+          console.log('Merge error (non-fatal):', mergeErr);
+        }
+      }
+
+      // Save merged recording
+      await saveFile();
+      refreshAll();
+      toast('Recording stopped - ' + recording.frames.length + ' frames saved', 'success');
+    } else {
       toast('Stopped', 'success');
-      // Reload file if was recording
+      // Reload file if was playing
       if (filePath) {
         setTimeout(() => loadFile(filePath), 500);
       }
     }
+
+    updatePlaybackUI('idle', null);
   } catch (e) {
     toast('Stop error: ' + e.message, 'error');
     updatePlaybackUI('idle', null);
+    // Still save web frames if we have them
+    if (wasWebRecording && recording && recording.frames.length) {
+      await saveFile();
+    }
   }
 }
 
@@ -1997,9 +2112,13 @@ function addElementFrame(el) {
     toast('Load or create a file first', 'error');
     return;
   }
+  // Use accurate web recording timestamp if recording is active
+  const t = webRecording
+    ? Date.now() - webRecStartTime
+    : (recording.frames.length ? recording.frames[recording.frames.length - 1].t + 1000 : 0);
   const f = {
     id: nextId(),
-    t: recording.frames.length ? recording.frames[recording.frames.length - 1].t + 1000 : 0,
+    t: t,
     type: 'element',
     action: 'tap',
     resource_id: el.resource_id || '',
@@ -2009,23 +2128,130 @@ function addElementFrame(el) {
     note: '',
   };
   recording.frames.push(f);
+  if (webRecording) {
+    webRecFrameCount++;
+    const stepInfo = document.getElementById('stepInfo');
+    if (stepInfo) stepInfo.textContent = webRecFrameCount + ' frames';
+  }
   selectedId = f.id;
   refreshAll();
-  toast('Added element: ' + (el.text || (el.resource_id||'').split('/').pop() || 'element'), 'success');
+
+  // Also send tap to device at element center during recording
+  if (webRecording && el.center) {
+    api('POST', '/tap', { x: el.center[0], y: el.center[1] }).then(() => {
+      setTimeout(captureScreen, 500);
+    }).catch(() => {});
+  }
+
+  toast('Added element: ' + (el.text || (el.resource_id||'').split('/').pop() || 'element') + (webRecording ? ' [REC]' : ''), 'success');
 }
 
 // ============================================================
-// SCREEN TOUCH INTERACTION (tap & swipe)
+// SCREEN TOUCH INTERACTION (tap & swipe) + WEB RECORDING
 // ============================================================
 let touchStartPos = null;
 let touchStartTime = 0;
+
+function screenPosToDevice(px, py) {
+  const img = document.getElementById('screenImg');
+  if (!img || !screenNaturalW || !screenNaturalH) return null;
+  const displayW = img.clientWidth;
+  const displayH = img.clientHeight;
+  if (displayW <= 0 || displayH <= 0) return null;
+  return {
+    x: Math.round(px / displayW * screenNaturalW),
+    y: Math.round(py / displayH * screenNaturalH),
+  };
+}
+
+function addWebRecFrame(action, startX, startY, endX, endY, durationMs) {
+  if (!webRecording || !recording) return;
+  const t = Date.now() - webRecStartTime;
+  const f = {
+    id: nextId(),
+    t: t,
+    type: 'gesture',
+    action: action,
+    x: startX,
+    y: startY,
+    x2: endX || startX,
+    y2: endY || startY,
+    duration_ms: durationMs || 50,
+    enabled: true,
+    note: '',
+  };
+  recording.frames.push(f);
+  webRecFrameCount++;
+  renderTimeline();
+  // Scroll to bottom of timeline
+  const tl = document.getElementById('timeline');
+  if (tl) tl.scrollTop = tl.scrollHeight;
+  // Update step info
+  const stepInfo = document.getElementById('stepInfo');
+  if (stepInfo) stepInfo.textContent = webRecFrameCount + ' frames';
+}
+
+async function handleScreenInteraction(startPx, startPy, endPx, endPy, elapsed) {
+  const img = document.getElementById('screenImg');
+  if (!img || !screenNaturalW || !screenNaturalH) return;
+
+  const startDev = screenPosToDevice(startPx, startPy);
+  const endDev = screenPosToDevice(endPx, endPy);
+  if (!startDev || !endDev) return;
+
+  const dx = endPx - startPx;
+  const dy = endPy - startPy;
+  const dist = Math.sqrt(dx * dx + dy * dy);
+
+  // Show visual touch feedback
+  showTouchFeedback(startPx, startPy);
+
+  const status = document.getElementById('deviceStatus');
+
+  if (dist < 10) {
+    // Tap
+    status.textContent = 'Tap: (' + startDev.x + ', ' + startDev.y + ')...';
+    // Record frame BEFORE sending to device (accurate timing)
+    addWebRecFrame('tap', startDev.x, startDev.y, startDev.x, startDev.y, Math.max(50, elapsed));
+    try {
+      const res = await api('POST', '/tap', { x: startDev.x, y: startDev.y });
+      if (res.ok) {
+        status.textContent = 'Tapped (' + startDev.x + ', ' + startDev.y + ')' + (webRecording ? ' [REC]' : '');
+        setTimeout(captureScreen, 500);
+      } else {
+        status.textContent = 'Tap failed: ' + (res.error || '');
+      }
+    } catch (err) {
+      status.textContent = 'Tap error: ' + err.message;
+    }
+  } else {
+    // Swipe
+    const duration = Math.max(150, Math.min(elapsed, 1500));
+    status.textContent = 'Swipe: (' + startDev.x + ',' + startDev.y + ') -> (' + endDev.x + ',' + endDev.y + ')...';
+    // Record frame BEFORE sending to device (accurate timing)
+    addWebRecFrame('swipe', startDev.x, startDev.y, endDev.x, endDev.y, duration);
+    try {
+      const res = await api('POST', '/swipe', { x1: startDev.x, y1: startDev.y, x2: endDev.x, y2: endDev.y, duration: duration });
+      if (res.ok) {
+        status.textContent = 'Swiped (' + startDev.x + ',' + startDev.y + ') -> (' + endDev.x + ',' + endDev.y + ')' + (webRecording ? ' [REC]' : '');
+        setTimeout(captureScreen, 500);
+      } else {
+        status.textContent = 'Swipe failed: ' + (res.error || '');
+      }
+    } catch (err) {
+      status.textContent = 'Swipe error: ' + err.message;
+    }
+  }
+}
 
 function initScreenTouch() {
   const container = document.getElementById('screenContainer');
   if (!container) return;
 
+  // --- Mouse events (desktop) ---
   container.addEventListener('mousedown', (e) => {
     if (e.target.classList.contains('element-overlay')) return;
+    if (ctrlHeld) return; // Ctrl+hover mode, don't start touch
     const rect = container.getBoundingClientRect();
     touchStartPos = { x: e.clientX - rect.left, y: e.clientY - rect.top };
     touchStartTime = Date.now();
@@ -2037,63 +2263,150 @@ function initScreenTouch() {
     const rect = container.getBoundingClientRect();
     const endPos = { x: e.clientX - rect.left, y: e.clientY - rect.top };
     const elapsed = Date.now() - touchStartTime;
-
-    const img = document.getElementById('screenImg');
-    if (!img || !screenNaturalW || !screenNaturalH) { touchStartPos = null; return; }
-
-    const displayW = img.clientWidth;
-    const displayH = img.clientHeight;
-
-    // Convert display coordinates to device coordinates
-    const startX = Math.round(touchStartPos.x / displayW * screenNaturalW);
-    const startY = Math.round(touchStartPos.y / displayH * screenNaturalH);
-    const endX = Math.round(endPos.x / displayW * screenNaturalW);
-    const endY = Math.round(endPos.y / displayH * screenNaturalH);
-
-    const dx = endPos.x - touchStartPos.x;
-    const dy = endPos.y - touchStartPos.y;
-    const dist = Math.sqrt(dx * dx + dy * dy);
-
-    // Show visual touch feedback
-    showTouchFeedback(touchStartPos.x, touchStartPos.y);
-
-    if (dist < 10) {
-      // Tap
-      const status = document.getElementById('deviceStatus');
-      status.textContent = 'Tap: (' + startX + ', ' + startY + ')...';
-      try {
-        const res = await api('POST', '/tap', { x: startX, y: startY });
-        if (res.ok) {
-          status.textContent = 'Tapped (' + startX + ', ' + startY + ')';
-          // Refresh screen after tap
-          setTimeout(captureScreen, 500);
-        } else {
-          status.textContent = 'Tap failed: ' + (res.error || '');
-        }
-      } catch (err) {
-        status.textContent = 'Tap error: ' + err.message;
-      }
-    } else {
-      // Swipe
-      const duration = Math.max(150, Math.min(elapsed, 1500));
-      const status = document.getElementById('deviceStatus');
-      status.textContent = 'Swipe: (' + startX + ',' + startY + ') -> (' + endX + ',' + endY + ')...';
-      try {
-        const res = await api('POST', '/swipe', { x1: startX, y1: startY, x2: endX, y2: endY, duration: duration });
-        if (res.ok) {
-          status.textContent = 'Swiped (' + startX + ',' + startY + ') -> (' + endX + ',' + endY + ')';
-          setTimeout(captureScreen, 500);
-        } else {
-          status.textContent = 'Swipe failed: ' + (res.error || '');
-        }
-      } catch (err) {
-        status.textContent = 'Swipe error: ' + err.message;
-      }
-    }
+    await handleScreenInteraction(touchStartPos.x, touchStartPos.y, endPos.x, endPos.y, elapsed);
     touchStartPos = null;
   });
 
   container.addEventListener('mouseleave', () => { touchStartPos = null; });
+
+  // --- Touch events (mobile browser) ---
+  let mobileTouchStart = null;
+  let mobileTouchStartTime = 0;
+
+  container.addEventListener('touchstart', (e) => {
+    if (e.target.classList.contains('element-overlay')) return;
+    const touch = e.touches[0];
+    const rect = container.getBoundingClientRect();
+    mobileTouchStart = { x: touch.clientX - rect.left, y: touch.clientY - rect.top };
+    mobileTouchStartTime = Date.now();
+    e.preventDefault();
+  }, { passive: false });
+
+  container.addEventListener('touchend', async (e) => {
+    if (!mobileTouchStart) return;
+    const touch = e.changedTouches[0];
+    const rect = container.getBoundingClientRect();
+    const endPos = { x: touch.clientX - rect.left, y: touch.clientY - rect.top };
+    const elapsed = Date.now() - mobileTouchStartTime;
+    await handleScreenInteraction(mobileTouchStart.x, mobileTouchStart.y, endPos.x, endPos.y, elapsed);
+    mobileTouchStart = null;
+    e.preventDefault();
+  }, { passive: false });
+
+  container.addEventListener('touchcancel', () => { mobileTouchStart = null; });
+
+  // --- Ctrl+Hover element inspection ---
+  container.addEventListener('mousemove', (e) => {
+    if (!ctrlHeld) { hideInspectTooltip(); return; }
+    const rect = container.getBoundingClientRect();
+    const px = e.clientX - rect.left;
+    const py = e.clientY - rect.top;
+    const dev = screenPosToDevice(px, py);
+    if (!dev) return;
+
+    // Debounce: only fetch every 250ms
+    clearTimeout(inspectDebounceTimer);
+    inspectDebounceTimer = setTimeout(async () => {
+      try {
+        const data = await api('POST', '/inspect', { x: dev.x, y: dev.y });
+        showInspectTooltip(container, px, py, dev.x, dev.y, data);
+      } catch (err) {
+        // ignore
+      }
+    }, 250);
+  });
+}
+
+// ============================================================
+// CTRL+HOVER ELEMENT INSPECTION
+// ============================================================
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'Control') ctrlHeld = true;
+});
+document.addEventListener('keyup', (e) => {
+  if (e.key === 'Control') {
+    ctrlHeld = false;
+    hideInspectTooltip();
+  }
+});
+
+function showInspectTooltip(container, px, py, devX, devY, data) {
+  hideInspectTooltip();
+  if (!data || !data.elements || !data.elements.length) {
+    // Show position-only tooltip
+    const tip = document.createElement('div');
+    tip.className = 'inspect-tooltip';
+    tip.innerHTML = '<div class="it-header">Inspect (' + devX + ', ' + devY + ')</div>'
+      + '<div class="it-row" style="color:var(--text2)">No elements at this position</div>';
+    tip.style.left = Math.min(px + 15, container.clientWidth - 350) + 'px';
+    tip.style.top = Math.min(py + 15, container.clientHeight - 100) + 'px';
+    container.appendChild(tip);
+    inspectTooltipEl = tip;
+    return;
+  }
+
+  const img = document.getElementById('screenImg');
+  const displayW = img.clientWidth;
+  const displayH = img.clientHeight;
+
+  // Draw highlight boxes for matching elements
+  data.elements.forEach((el) => {
+    if (!el.bounds || el.bounds.length < 4) return;
+    const [x1, y1, x2, y2] = el.bounds;
+    const scaleX = displayW / screenNaturalW;
+    const scaleY = displayH / screenNaturalH;
+    const hl = document.createElement('div');
+    hl.className = 'inspect-highlight';
+    hl.style.left = (x1 * scaleX) + 'px';
+    hl.style.top = (y1 * scaleY) + 'px';
+    hl.style.width = ((x2 - x1) * scaleX) + 'px';
+    hl.style.height = ((y2 - y1) * scaleY) + 'px';
+    container.appendChild(hl);
+    inspectHighlightEls.push(hl);
+  });
+
+  // Build tooltip HTML
+  let html = '<div class="it-header">Inspect (' + devX + ', ' + devY + ') - ' + data.elements.length + ' element(s)</div>';
+  data.elements.forEach((el, i) => {
+    html += '<div style="border-top:1px solid var(--border);padding-top:4px;margin-top:4px">';
+    html += '<div class="it-row"><span class="it-label">Class: </span><span class="it-value">' + esc((el.cls || '').split('.').pop()) + '</span></div>';
+    if (el.text) html += '<div class="it-row"><span class="it-label">Text: </span><span class="it-text">' + esc(el.text) + '</span></div>';
+    if (el.resource_id) html += '<div class="it-row"><span class="it-label">ID: </span><span class="it-value">' + esc(el.resource_id) + '</span></div>';
+    if (el.content_desc) html += '<div class="it-row"><span class="it-label">Desc: </span><span class="it-value">' + esc(el.content_desc) + '</span></div>';
+    html += '<div class="it-row"><span class="it-label">Bounds: </span><span class="it-value">[' + el.bounds.join(',') + ']</span>';
+    if (el.clickable) html += ' <span style="color:var(--orange)">clickable</span>';
+    if (!el.enabled) html += ' <span style="color:var(--red)">disabled</span>';
+    html += '</div>';
+    html += '</div>';
+  });
+
+  // Show all text found at this position
+  if (data.all_text && data.all_text.length) {
+    html += '<div style="border-top:1px solid var(--border);padding-top:4px;margin-top:6px">';
+    html += '<div class="it-row"><span class="it-label">All text at point:</span></div>';
+    data.all_text.forEach(t => {
+      html += '<div class="it-row" style="padding-left:8px"><span class="it-text">' + esc(t) + '</span></div>';
+    });
+    html += '</div>';
+  }
+
+  const tip = document.createElement('div');
+  tip.className = 'inspect-tooltip';
+  tip.innerHTML = html;
+  // Position tooltip (keep within container bounds)
+  const tipX = px + 20 > container.clientWidth - 350 ? Math.max(0, px - 350) : px + 20;
+  const tipY = py + 20;
+  tip.style.left = tipX + 'px';
+  tip.style.top = tipY + 'px';
+  container.appendChild(tip);
+  inspectTooltipEl = tip;
+}
+
+function hideInspectTooltip() {
+  if (inspectTooltipEl) { inspectTooltipEl.remove(); inspectTooltipEl = null; }
+  inspectHighlightEls.forEach(el => el.remove());
+  inspectHighlightEls = [];
+  clearTimeout(inspectDebounceTimer);
 }
 
 function showTouchFeedback(x, y) {
@@ -2112,10 +2425,28 @@ function showTouchFeedback(x, y) {
 async function sendKey(keycode) {
   const status = document.getElementById('deviceStatus');
   status.textContent = 'Sending key ' + keycode + '...';
+
+  // Record key frame during web recording
+  if (webRecording && recording) {
+    const keyNames = {3:'HOME',4:'BACK',24:'VOLUME_UP',25:'VOLUME_DOWN',26:'POWER',66:'ENTER',67:'DEL',82:'MENU',187:'APP_SWITCH',224:'WAKEUP'};
+    const f = {
+      id: nextId(),
+      t: Date.now() - webRecStartTime,
+      type: 'key',
+      keycode: keycode,
+      key_name: keyNames[keycode] || String(keycode),
+      enabled: true,
+      note: '',
+    };
+    recording.frames.push(f);
+    webRecFrameCount++;
+    renderTimeline();
+  }
+
   try {
     const res = await api('POST', '/key', { keycode: keycode });
     if (res.ok) {
-      status.textContent = 'Key ' + keycode + ' sent';
+      status.textContent = 'Key ' + keycode + ' sent' + (webRecording ? ' [REC]' : '');
       setTimeout(captureScreen, 400);
     } else {
       status.textContent = 'Key failed: ' + (res.error || '');
@@ -2261,6 +2592,8 @@ class EditorHandler(BaseHTTPRequestHandler):
             self._json(self._device_text(body))
         elif path == "/api/shell":
             self._json(self._device_shell(body))
+        elif path == "/api/inspect":
+            self._json(self._inspect_at_point(body))
         else:
             self._error(404, "Not Found")
 
@@ -2591,6 +2924,122 @@ class EditorHandler(BaseHTTPRequestHandler):
             return {"ok": True, "output": result.stdout, "error": result.stderr}
         except Exception as e:
             return {"ok": False, "error": str(e)}
+
+    def _inspect_at_point(self, body: dict) -> dict:
+        """Inspect UI elements at a specific screen coordinate.
+
+        Returns all elements containing the point, plus all text content
+        found at and around that position.
+        """
+        x = int(body.get("x", 0))
+        y = int(body.get("y", 0))
+        serial = body.get("serial", "")
+
+        try:
+            prefix = ["adb", "-s", serial] if serial else ["adb"]
+            remote = "/sdcard/window_dump.xml"
+
+            # Dump UI hierarchy
+            subprocess.run(
+                prefix + ["shell", "uiautomator", "dump", remote],
+                capture_output=True, text=True, timeout=15,
+            )
+
+            # Read XML
+            r2 = subprocess.run(
+                prefix + ["exec-out", "cat", remote],
+                capture_output=True, text=True, timeout=10,
+            )
+
+            if r2.returncode != 0 or not r2.stdout.strip():
+                return {"error": "UI dump failed", "elements": [], "all_text": []}
+
+            root = _ET.fromstring(r2.stdout)
+            bounds_pat = _re.compile(r"\[(\d+),(\d+)\]\[(\d+),(\d+)\]")
+
+            elements: list = []
+            all_text: list = []
+            seen_text: set = set()
+
+            def walk(node: _ET.Element) -> None:
+                if node.tag != "node":
+                    for child in node:
+                        walk(child)
+                    return
+
+                attrs = node.attrib
+                bounds_raw = attrs.get("bounds", "")
+                match = bounds_pat.match(bounds_raw)
+                if not match:
+                    for child in node:
+                        walk(child)
+                    return
+
+                x1, y1, x2, y2 = map(int, match.groups())
+
+                # Check if this element contains the point
+                if x1 <= x <= x2 and y1 <= y <= y2:
+                    # Collect text from this element and all children
+                    text = attrs.get("text", "").strip()
+                    if text and text not in seen_text:
+                        all_text.append(text)
+                        seen_text.add(text)
+
+                    # Collect child text too
+                    def collect_child_text(n: _ET.Element) -> None:
+                        if n.tag == "node":
+                            t = n.attrib.get("text", "").strip()
+                            if t and t not in seen_text:
+                                all_text.append(t)
+                                seen_text.add(t)
+                        for c in n:
+                            collect_child_text(c)
+                    for child in node:
+                        collect_child_text(child)
+
+                    # Add element info (only meaningful elements)
+                    rid = attrs.get("resource-id", "")
+                    cls = attrs.get("class", "")
+                    clickable = attrs.get("clickable") == "true"
+                    enabled = attrs.get("enabled") == "true"
+                    content_desc = attrs.get("content-desc", "").strip()
+                    w = x2 - x1
+                    h = y2 - y1
+
+                    # Skip full-screen containers that aren't very useful
+                    if w * h < 2073600:  # less than full 1080x1920
+                        elements.append({
+                            "resource_id": rid,
+                            "text": text,
+                            "cls": cls,
+                            "bounds": [x1, y1, x2, y2],
+                            "center": [(x1 + x2) // 2, (y1 + y2) // 2],
+                            "clickable": clickable,
+                            "enabled": enabled,
+                            "content_desc": content_desc,
+                        })
+
+                for child in node:
+                    walk(child)
+
+            walk(root)
+
+            # Sort elements by area (smallest first = most specific)
+            elements.sort(key=lambda e: (e["bounds"][2] - e["bounds"][0]) * (e["bounds"][3] - e["bounds"][1]))
+
+            # Limit to most relevant elements
+            elements = elements[:10]
+
+            return {"elements": elements, "all_text": all_text, "point": [x, y]}
+
+        except _ET.ParseError as e:
+            return {"error": f"XML parse error: {e}", "elements": [], "all_text": []}
+        except subprocess.TimeoutExpired:
+            return {"error": "UI dump timed out", "elements": [], "all_text": []}
+        except FileNotFoundError:
+            return {"error": "ADB not found", "elements": [], "all_text": []}
+        except Exception as e:
+            return {"error": str(e), "elements": [], "all_text": []}
 
     def _hover_log(self, body: dict) -> dict:
         """Print hover details to terminal for quick inspection while editing."""
