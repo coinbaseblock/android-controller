@@ -205,25 +205,34 @@ class UniversalPlayer:
             self.log("Player stopped.")
 
     def _play_one_loop(self, loop_idx: int) -> bool:
-        prev_t = 0
+        # Record the wall-clock moment this loop started.  All frame delays are
+        # calculated as absolute offsets from this point so that execution time
+        # of each frame does not accumulate into the next frame's delay.
+        playback_start = time.time()
+        paused_total = 0.0  # seconds spent in pause state (excluded from playback clock)
 
         for i, frame in enumerate(self._frames):
             if not self._running:
                 return False
 
-            # Wait for paused state
-            while self.state.status == "paused":
-                time.sleep(0.5)
+            # Wait for paused state; track how long we were paused so the
+            # playback clock is not thrown off by user-initiated pauses.
+            if self.state.status == "paused":
+                pause_start = time.time()
+                while self.state.status == "paused":
+                    time.sleep(0.5)
+                paused_total += time.time() - pause_start
 
             self.state.current_step = i + 1
             self.state.current_step_desc = self._describe_frame(frame)
 
-            # Timing: wait based on time offset between frames
-            delay_ms = frame.t - prev_t
-            if delay_ms > 0 and self.speed > 0:
-                actual_delay = (delay_ms / 1000.0) / self.speed
-                if actual_delay > 0.01:
-                    time.sleep(actual_delay)
+            # Timing: sleep until the wall-clock moment this frame should fire.
+            # Using an absolute target avoids drift caused by frame execution time.
+            if self.speed > 0:
+                target_wall = playback_start + paused_total + (frame.t / 1000.0) / self.speed
+                now = time.time()
+                if target_wall > now + 0.01:
+                    time.sleep(target_wall - now)
 
             # Execute
             success = self._execute_frame(frame, i, loop_idx)
@@ -239,8 +248,6 @@ class UniversalPlayer:
                     self._running = False
                     return False
                 # "retry" is handled inside _execute_frame
-
-            prev_t = frame.t
 
         # Flush any remaining touch buffer at end of loop
         self._flush_touch_buffer()
