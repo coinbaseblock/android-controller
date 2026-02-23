@@ -100,6 +100,7 @@ class UniversalRecorder:
         self._app_monitor_stop = threading.Event()
         self._app_monitor_thread: Optional[threading.Thread] = None
         self._last_app: Dict[str, str] = {"package": "", "activity": ""}
+        self._event_wall_offset_ms: float = 0.0  # ms from _start_time to first getevent event
 
         # For raw recording
         self._last_x: Optional[int] = None
@@ -358,7 +359,13 @@ class UniversalRecorder:
         return int((time.time() - self._start_time) * 1000)
 
     def _ms_from_event_ts(self, timestamp_raw: str) -> int:
-        """Convert getevent timestamp to recording-relative milliseconds."""
+        """Convert getevent timestamp to recording-relative milliseconds.
+
+        getevent -lt uses the kernel's monotonic clock, while _start_time uses
+        time.time() (wall clock).  On the first event we calibrate the offset
+        between the two clocks so that touch frames and app-monitor frames share
+        the same time reference.
+        """
         try:
             event_ts = float(timestamp_raw)
         except (TypeError, ValueError):
@@ -366,8 +373,11 @@ class UniversalRecorder:
 
         if self._event_start_ts is None:
             self._event_start_ts = event_ts
+            # Record the wall-clock offset (ms from _start_time to first event).
+            # This keeps getevent-relative timestamps in sync with _ms_since_start().
+            self._event_wall_offset_ms = (time.time() - self._start_time) * 1000.0
 
-        return max(0, int((event_ts - self._event_start_ts) * 1000))
+        return max(0, int(self._event_wall_offset_ms + (event_ts - self._event_start_ts) * 1000))
 
     def _add_frame(self, frame: Frame) -> Frame:
         with self._record_lock:
