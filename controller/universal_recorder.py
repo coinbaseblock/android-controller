@@ -915,6 +915,11 @@ class UniversalRecorder:
     def _add_wait(self, ms: int) -> None:
         f = Frame(t=self._ms_since_start(), type="wait", duration_ms=ms)
         self._add_frame(f)
+        # Shift time reference so subsequent frames account for the wait duration.
+        # Without this, the next command typed immediately after "w 3" would get a
+        # timestamp only a few hundred ms later, causing playback to skip the wait
+        # gap and execute the following action too early.
+        self._start_time -= ms / 1000.0
         print(f"  + wait {ms}ms")
 
     def _add_key(self, keycode: int) -> None:
@@ -987,6 +992,15 @@ class UniversalRecorder:
             print("  ไม่มีอะไรให้ลบ")
 
     def _finalize(self) -> None:
+        # Normalize timestamps so the first frame starts at t=0.
+        # Raw recordings have an initial offset (subprocess startup + ADB latency)
+        # that causes unnecessary delay at playback start.
+        if self.recording.frames:
+            first_t = self.recording.frames[0].t
+            if first_t > 0:
+                for frame in self.recording.frames:
+                    frame.t = max(0, frame.t - first_t)
+
         self.recording.meta.total_duration_ms = self.recording.total_duration()
         if self.recording.frames:
             self.recording.save(self.output)

@@ -208,7 +208,14 @@ class UniversalPlayer:
         # Record the wall-clock moment this loop started.  All frame delays are
         # calculated as absolute offsets from this point so that execution time
         # of each frame does not accumulate into the next frame's delay.
-        playback_start = time.time()
+        #
+        # Subtract the first frame's timestamp so playback starts immediately
+        # instead of waiting through the initial offset (caused by subprocess
+        # startup, ADB latency, or time before the user's first action).
+        # New recordings are already normalized to t=0, but older recordings
+        # may still carry an initial offset.
+        initial_offset = (self._frames[0].t / 1000.0) / self.speed if self._frames else 0
+        playback_start = time.time() - initial_offset
         paused_total = 0.0  # seconds spent in pause state (excluded from playback clock)
 
         for i, frame in enumerate(self._frames):
