@@ -500,7 +500,15 @@ class UniversalPlayer:
         run_adb(prefix + ["shell"] + frame.command.split())
 
     def _exec_extract(self, frame: Frame, idx: int, loop_idx: int) -> None:
-        """Extract UI data from current screen and save to log."""
+        """Extract UI data from current screen and save to log.
+
+        Each log entry includes coordinates (bounds, center) for every element
+        so that the data can be mapped back to the exact screen region during
+        analysis.  For Ctrl-capture frames the recorded ``extract_fields``
+        already carry the original coordinates; we re-read the current screen
+        and match them so the log contains both the *recorded* coordinates and
+        the *current* (replay-time) coordinates for comparison.
+        """
         label = frame.extract_label or f"extract_{idx}"
         self.log(f"  Extract: {label}", "STEP")
 
@@ -523,6 +531,18 @@ class UniversalPlayer:
                 rid = field_def.get("resource_id", "")
                 text_match = field_def.get("text_match", "")
 
+                # Carry over the recorded coordinates so the log shows both
+                # the original (record-time) and current (replay-time) values.
+                recorded_coords: Optional[Dict[str, Any]] = None
+                if field_def.get("bounds") or field_def.get("center"):
+                    recorded_coords = {}
+                    if field_def.get("bounds"):
+                        recorded_coords["bounds"] = field_def["bounds"]
+                    if field_def.get("center"):
+                        recorded_coords["center"] = field_def["center"]
+                    if field_def.get("text"):
+                        recorded_coords["text"] = field_def["text"]
+
                 matched_values = []
                 for el in elements:
                     # Match by resource_id
@@ -530,9 +550,21 @@ class UniversalPlayer:
                         matched_values.append({
                             "text": getattr(el, "text", ""),
                             "resource_id": getattr(el, "resource_id", ""),
-                            "class": getattr(el, "class_name", ""),
-                            "bounds": getattr(el, "bounds", []),
+                            "class": getattr(el, "cls", ""),
+                            "bounds": list(getattr(el, "bounds", ())),
+                            "center": list(getattr(el, "center", ())),
                         })
+                    # Match by exact text from recording (for Ctrl captures)
+                    elif not rid and not text_match and field_def.get("text"):
+                        el_text = getattr(el, "text", "")
+                        if el_text and el_text.strip() == field_def["text"]:
+                            matched_values.append({
+                                "text": el_text.strip(),
+                                "resource_id": getattr(el, "resource_id", ""),
+                                "class": getattr(el, "cls", ""),
+                                "bounds": list(getattr(el, "bounds", ())),
+                                "center": list(getattr(el, "center", ())),
+                            })
                     # Match by text pattern (regex)
                     elif text_match and hasattr(el, "text"):
                         el_text = getattr(el, "text", "")
@@ -540,20 +572,28 @@ class UniversalPlayer:
                             matched_values.append({
                                 "text": el_text,
                                 "resource_id": getattr(el, "resource_id", ""),
-                                "class": getattr(el, "class_name", ""),
-                                "bounds": getattr(el, "bounds", []),
+                                "class": getattr(el, "cls", ""),
+                                "bounds": list(getattr(el, "bounds", ())),
+                                "center": list(getattr(el, "center", ())),
                             })
 
+                entry: Dict[str, Any]
                 if len(matched_values) == 1:
-                    fields_data[fname] = matched_values[0]
+                    entry = matched_values[0]
                 elif matched_values:
-                    fields_data[fname] = matched_values
+                    entry = {"matches": matched_values}
                 else:
-                    fields_data[fname] = None
+                    entry = {"matches": None}
+
+                # Attach the recorded coordinates so the reader can compare
+                if recorded_coords:
+                    entry["recorded"] = recorded_coords
+
+                fields_data[fname] = entry
 
             result["fields"] = fields_data
 
-        # Capture all visible text if requested
+        # Capture all visible text if requested — include coordinates
         if frame.extract_all_text:
             all_texts = []
             for el in elements:
@@ -562,7 +602,9 @@ class UniversalPlayer:
                     all_texts.append({
                         "text": text.strip(),
                         "resource_id": getattr(el, "resource_id", ""),
-                        "class": getattr(el, "class_name", ""),
+                        "class": getattr(el, "cls", ""),
+                        "bounds": list(getattr(el, "bounds", ())),
+                        "center": list(getattr(el, "center", ())),
                     })
             result["all_text"] = all_texts
 
@@ -585,7 +627,9 @@ class UniversalPlayer:
         with open(log_file, "a", encoding="utf-8") as f:
             f.write(json.dumps(result, ensure_ascii=False) + "\n")
 
-        self.log(f"  Extracted {len(result.get('fields', {}))} fields -> {log_file}", "OK")
+        field_count = len(result.get("fields", {}))
+        text_count = len(result.get("all_text", []))
+        self.log(f"  Extracted {field_count} fields, {text_count} texts -> {log_file}", "OK")
 
     # ---------- Helpers ----------
 

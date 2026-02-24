@@ -458,18 +458,40 @@ class UniversalRecorder:
     def _capture_ctrl_extract(self, event_t: int) -> None:
         """When Ctrl is pressed during recording, capture an extract frame for logging.
 
-        This collects all visible UI text and records it as an 'extract' frame,
-        making it easy to capture screen state at specific moments.
+        This collects all visible UI text WITH coordinates (bounds, center) and
+        records it as an 'extract' frame.  Each element is stored in
+        ``extract_fields`` so that during playback the log can map every piece
+        of text back to its exact screen region.
         """
         try:
-            all_texts = set()
             xml = get_ui_xml(self.serial)
             elements = parse_all_elements(xml)
-            for el in elements:
-                if el.text and el.text.strip():
-                    all_texts.add(el.text.strip())
 
-            text_list = sorted(all_texts)
+            # Build per-element field entries that include coordinates
+            fields: List[Dict[str, Any]] = []
+            seen_texts: Set[str] = set()
+            for el in elements:
+                if not el.text or not el.text.strip():
+                    continue
+                text = el.text.strip()
+                # Use text+bounds as key to keep duplicates at different positions
+                dedup_key = f"{text}|{el.bounds}"
+                if dedup_key in seen_texts:
+                    continue
+                seen_texts.add(dedup_key)
+
+                fields.append({
+                    "name": el.resource_id.split("/")[-1] if el.resource_id else text[:30],
+                    "resource_id": el.resource_id,
+                    "text": text,
+                    "class": el.cls,
+                    "bounds": list(el.bounds),           # [x1, y1, x2, y2]
+                    "center": list(el.center),           # [cx, cy]
+                })
+
+            # Sort top-to-bottom, left-to-right so the order matches visual layout
+            fields.sort(key=lambda f: (f["bounds"][1], f["bounds"][0]))
+
             extract_id = self.recording.next_id()
             frame = Frame(
                 id=extract_id,
@@ -478,17 +500,19 @@ class UniversalRecorder:
                 extract_label=f"ctrl_capture_{extract_id}",
                 extract_all_text=True,
                 extract_screenshot=True,
-                extract_fields=[],
-                note=f"Ctrl capture | {len(text_list)} text elements",
+                extract_fields=fields,
+                note=f"Ctrl capture | {len(fields)} text elements with coordinates",
             )
             self._add_frame(frame)
             ts_sec = event_t / 1000.0
-            print(f"\r  Ctrl Capture #{extract_id} at {ts_sec:.1f}s - {len(text_list)} texts found")
-            if text_list:
-                for txt in text_list[:10]:
-                    print(f"    > {txt[:80]}")
-                if len(text_list) > 10:
-                    print(f"    ... +{len(text_list)-10} more")
+            print(f"\r  Ctrl Capture #{extract_id} at {ts_sec:.1f}s - {len(fields)} texts found")
+            if fields:
+                for entry in fields[:10]:
+                    b = entry["bounds"]
+                    c = entry["center"]
+                    print(f"    > [{b[0]},{b[1]}]-[{b[2]},{b[3]}] center=({c[0]},{c[1]}) : {entry['text'][:60]}")
+                if len(fields) > 10:
+                    print(f"    ... +{len(fields)-10} more")
         except Exception as e:
             print(f"\r  Ctrl capture failed: {e}")
 
