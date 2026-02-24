@@ -809,6 +809,8 @@ input:focus, select:focus, textarea:focus { outline: none; border-color: var(--b
     <h1>Flow Editor</h1>
     <span id="fileName" style="color:var(--text2);font-size:13px;">No file loaded</span>
     <div class="sep" style="width:1px;height:24px;background:var(--border);margin:0 4px"></div>
+    <button class="btn btn-sm" onclick="newRecording()" title="Create a new empty recording" style="background:#238636;color:#fff;border-color:#238636;font-weight:600">+ New</button>
+    <div class="sep" style="width:1px;height:24px;background:var(--border);margin:0 4px"></div>
     <!-- Play/Rec Controls -->
     <div class="playback-controls">
       <button type="button" class="btn btn-sm btn-play" id="btnPlay" title="Play recording">
@@ -842,8 +844,15 @@ input:focus, select:focus, textarea:focus { outline: none; border-color: var(--b
     <div class="sidebar">
       <!-- Files -->
       <div class="sidebar-section" data-hover-scope="files">
-        <h3>Files</h3>
-        <div class="file-list" id="fileList"></div>
+        <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px">
+          <h3 style="margin-bottom:0">Files</h3>
+          <button class="btn btn-sm" onclick="newRecording()" style="font-size:10px;padding:2px 8px">+ New</button>
+        </div>
+        <div id="fileFilter" style="margin-bottom:6px">
+          <input type="text" id="fileSearch" placeholder="Filter files..." oninput="filterFiles()" style="width:100%;font-size:11px;padding:4px 8px;border-radius:4px;border:1px solid var(--border);background:var(--bg);color:var(--text)">
+        </div>
+        <div class="file-list" id="fileList" style="max-height:300px"></div>
+        <div style="font-size:10px;color:var(--text2);padding:4px 0;margin-top:4px" id="fileCount"></div>
       </div>
 
       <!-- Meta -->
@@ -891,17 +900,18 @@ input:focus, select:focus, textarea:focus { outline: none; border-color: var(--b
       <!-- Sequence Runner -->
       <div class="sidebar-section" data-hover-scope="sequence">
         <h3>Sequence Runner</h3>
-        <div id="seqList" style="max-height:250px;overflow-y:auto;margin-bottom:8px;font-size:12px"></div>
+        <div id="seqList" style="max-height:350px;overflow-y:auto;margin-bottom:8px;font-size:12px"></div>
         <div id="seqFilePicker" style="display:none;margin-bottom:6px"></div>
         <div class="btn-group" style="flex-wrap:wrap;gap:4px">
-          <button class="btn btn-sm" onclick="seqAddCurrent()" title="Add current file to sequence">+ Add Current</button>
-          <button class="btn btn-sm" onclick="seqAddFromList()" title="Pick file to add">+ Pick File</button>
-          <button class="btn btn-sm" onclick="seqClear()" title="Clear sequence">Clear</button>
+          <button class="btn btn-sm" onclick="seqAddCurrent()" title="Add current file to sequence">+ Current</button>
+          <button class="btn btn-sm" onclick="seqAddFromList()" title="Pick file to add">+ Pick</button>
+          <button class="btn btn-sm" onclick="seqAddAllFiles()" title="Add all files sorted by name">+ All</button>
+          <button class="btn btn-sm btn-danger" onclick="seqClear()" title="Clear sequence" style="font-size:10px">Clear</button>
         </div>
         <div style="margin-top:8px">
           <div class="field-row" style="gap:6px;margin-bottom:4px">
             <div class="field"><label style="font-size:10px">Loop</label>
-              <select id="seqLoop" style="font-size:11px"><option value="false">No</option><option value="true">Yes</option></select>
+              <select id="seqLoop" style="font-size:11px"><option value="false">No</option><option value="true" selected>Yes</option></select>
             </div>
             <div class="field"><label style="font-size:10px">Count</label>
               <input id="seqLoopCount" type="number" value="0" min="0" style="width:50px;font-size:11px" title="0 = infinite">
@@ -1135,13 +1145,79 @@ let _availableFiles = [];  // all loadable file paths
 async function loadFileList() {
   const data = await api('GET', '/files');
   _availableFiles = data.files || [];
+  renderFileList();
+}
+
+function renderFileList() {
   const el = document.getElementById('fileList');
-  el.innerHTML = _availableFiles.map(f =>
-    `<div class="file-item ${f===filePath?'active':''}" data-path="${esc(f)}" style="display:flex;align-items:center;gap:4px">
-      <span style="flex:1;cursor:pointer;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" onclick="loadFile('${f}')"><span class="file-icon">&#128196;</span>${f.split('/').pop()}</span>
+  const search = (document.getElementById('fileSearch')?.value || '').toLowerCase();
+  const filtered = search ? _availableFiles.filter(f => f.toLowerCase().includes(search)) : _availableFiles;
+
+  // Sort: .urf.json files first, then by name
+  const sorted = [...filtered].sort((a, b) => {
+    const aName = a.split('/').pop();
+    const bName = b.split('/').pop();
+    return aName.localeCompare(bName);
+  });
+
+  el.innerHTML = sorted.map(f => {
+    const name = f.split('/').pop();
+    const isActive = f === filePath;
+    // Try to detect station number
+    const numMatch = name.match(/^(\d+)[.-]/);
+    const numBadge = numMatch ? `<span style="background:var(--blue);color:#fff;border-radius:50%;min-width:18px;height:18px;display:inline-flex;align-items:center;justify-content:center;font-size:9px;font-weight:700;flex-shrink:0">${numMatch[1]}</span>` : '<span class="file-icon" style="font-size:11px;opacity:.6">&#128196;</span>';
+    return `<div class="file-item ${isActive?'active':''}" data-path="${esc(f)}" style="display:flex;align-items:center;gap:4px">
+      ${numBadge}
+      <span style="flex:1;cursor:pointer;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:12px" onclick="loadFile('${f}')" title="${esc(name)}">${esc(name)}</span>
       <button class="btn-delete-file" onclick="event.stopPropagation();deleteFile('${f}')" title="Delete file">&times;</button>
-    </div>`
-  ).join('') || '<div style="color:var(--text2);padding:8px;font-size:12px">No .urf.json files</div>';
+    </div>`;
+  }).join('') || '<div style="color:var(--text2);padding:8px;font-size:12px">No .urf.json files</div>';
+
+  const countEl = document.getElementById('fileCount');
+  if (countEl) countEl.textContent = sorted.length + ' file' + (sorted.length !== 1 ? 's' : '') + (search ? ' (filtered)' : '');
+}
+
+function filterFiles() { renderFileList(); }
+
+function newRecording() {
+  const name = prompt('Recording name (e.g. station-01, station-02):');
+  if (!name) return;
+  // Sanitize filename
+  const safeName = name.replace(/[^a-zA-Z0-9\u0E00-\u0E7F_.-]/g, '-').replace(/-+/g, '-');
+  const fileName = safeName.endsWith('.urf.json') ? safeName : safeName + '.urf.json';
+  const pkg = recording?.meta?.app_package || '';
+  const askPkg = pkg || prompt('App package name (e.g. com.example.app):', '') || '';
+
+  recording = {
+    version: 2,
+    meta: {
+      name: name,
+      created: new Date().toISOString(),
+      device: recording?.meta?.device || '',
+      screen_width: screenNaturalW || 1080,
+      screen_height: screenNaturalH || 2400,
+      app_package: askPkg,
+      recording_mode: 'mixed',
+      total_duration_ms: 0,
+    },
+    settings: {
+      loop: false, loop_count: 0, loop_delay: 5, speed: 1.0,
+      on_error: 'retry', max_retries: 3, retry_delay: 2.0,
+      screenshot_dir: '/img/captures',
+      send_to: { method: 'cp', path: '/img/sent' },
+      notify: true, notify_method: 'stdout', notify_url: '',
+    },
+    frames: [],
+  };
+  filePath = '/work/' + fileName;
+  document.getElementById('fileName').textContent = fileName;
+
+  // Save empty file immediately so it appears in the list
+  api('POST', '/save', {path: filePath, recording: recording}).then(() => {
+    loadFileList();
+    refreshAll();
+    toast('Created: ' + fileName, 'success');
+  });
 }
 
 async function loadFile(path) {
@@ -1893,38 +1969,67 @@ function clearAll() {
 let seqScripts = [];  // [{path, name, enabled}]
 let seqRunning = false;
 let seqPollTimer = null;
+let seqDragSrcIdx = -1;
 
 function seqRenderList() {
   const el = document.getElementById('seqList');
   if (!seqScripts.length) {
-    el.innerHTML = '<div style="color:var(--text2);font-style:italic;padding:4px">No scripts in sequence</div>';
+    el.innerHTML = '<div style="color:var(--text2);font-style:italic;padding:4px">No scripts in sequence. Use "+ Pick" to add station recordings.</div>';
     return;
   }
-  const letters = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ';
+
   el.innerHTML = seqScripts.map((s, i) => {
-    const letter = i < 26 ? letters[i] : (i + 1);
     const isLast = i === seqScripts.length - 1;
+    const numLabel = i + 1;
+    // Extract short display name
+    const displayName = s.name.replace('.urf.json', '');
     return `
-    <div class="seq-item" style="position:relative">
-      <div style="display:flex;align-items:center;gap:4px;padding:4px 6px;background:${s.enabled?'var(--bg3)':'var(--bg2)'};border-radius:6px;border:1px solid ${s.enabled?'var(--border)':'transparent'};${!s.enabled?'opacity:.4':''}">
-        <input type="checkbox" ${s.enabled?'checked':''} onchange="seqToggle(${i},this.checked)" style="margin:0">
-        <span class="seq-letter" style="min-width:22px;height:22px;display:flex;align-items:center;justify-content:center;background:${s.enabled?'var(--blue)':'var(--text2)'};color:#000;border-radius:50%;font-size:10px;font-weight:700">${letter}</span>
-        <span style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:12px" title="${esc(s.path)}">${esc(s.name)}</span>
+    <div class="seq-item" data-seq-idx="${i}" draggable="true"
+         ondragstart="seqDragStart(event,${i})" ondragover="seqDragOver(event)" ondrop="seqDrop(event,${i})" ondragend="seqDragEnd(event)"
+         style="position:relative">
+      <div style="display:flex;align-items:center;gap:3px;padding:3px 5px;background:${s.enabled?'var(--bg3)':'var(--bg2)'};border-radius:6px;border:1px solid ${s.enabled?'var(--border)':'transparent'};${!s.enabled?'opacity:.35':''}cursor:grab;">
+        <span style="min-width:20px;height:20px;display:flex;align-items:center;justify-content:center;background:${s.enabled?'var(--blue)':'var(--text2)'};color:#000;border-radius:50%;font-size:9px;font-weight:700;flex-shrink:0">${numLabel}</span>
+        <span style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:11px" title="${esc(s.path)}">${esc(displayName)}</span>
+        <button onclick="seqDuplicate(${i})" style="background:none;border:none;color:var(--blue);cursor:pointer;font-size:10px;padding:0 2px" title="Duplicate">&#x2398;</button>
         <button onclick="seqMoveUp(${i})" style="background:none;border:none;color:var(--text2);cursor:pointer;font-size:10px;padding:0 2px" title="Move up">&uarr;</button>
         <button onclick="seqMoveDown(${i})" style="background:none;border:none;color:var(--text2);cursor:pointer;font-size:10px;padding:0 2px" title="Move down">&darr;</button>
-        <button onclick="seqRemove(${i})" style="background:none;border:none;color:var(--red);cursor:pointer;font-size:12px;padding:0 2px" title="Remove">&times;</button>
+        <button onclick="seqRemove(${i})" style="background:none;border:none;color:var(--red);cursor:pointer;font-size:11px;padding:0 2px" title="Remove">&times;</button>
       </div>
-      ${!isLast ? '<div style="text-align:center;color:var(--text2);font-size:10px;line-height:1;padding:1px 0">&#9660;</div>' : ''}
+      ${!isLast ? '<div style="text-align:center;color:var(--text2);font-size:8px;line-height:1;padding:0">&#9660;</div>' : ''}
     </div>`;
   }).join('');
 
-  // Show flow summary
+  // Show flow summary with file names
   const enabled = seqScripts.filter(s => s.enabled);
-  if (enabled.length > 1) {
-    const flowText = enabled.map((s, i) => (i < 26 ? letters[i] : (i+1))).join(' → ');
-    el.innerHTML += '<div style="color:var(--blue);font-size:10px;text-align:center;padding:4px;margin-top:2px;background:var(--bg);border-radius:4px;border:1px dashed var(--border)">' + flowText + (document.getElementById('seqLoop')?.value === 'true' ? ' ↻' : '') + '</div>';
+  if (enabled.length > 0) {
+    const flowNames = enabled.map(s => s.name.replace('.urf.json', ''));
+    // Compact display: group consecutive duplicates
+    const compact = [];
+    let prev = null, count = 0;
+    flowNames.forEach(n => {
+      if (n === prev) { count++; }
+      else { if (prev !== null) compact.push(count > 1 ? prev + 'x' + count : prev); prev = n; count = 1; }
+    });
+    if (prev !== null) compact.push(count > 1 ? prev + 'x' + count : prev);
+    const flowText = compact.join(' &rarr; ');
+    const loopIcon = document.getElementById('seqLoop')?.value === 'true' ? ' &#8634;' : '';
+    el.innerHTML += `<div style="color:var(--blue);font-size:10px;text-align:center;padding:4px;margin-top:2px;background:var(--bg);border-radius:4px;border:1px dashed var(--border);word-break:break-all">${flowText}${loopIcon}</div>`;
+    el.innerHTML += `<div style="color:var(--text2);font-size:10px;text-align:center;padding:2px">${enabled.length} scripts</div>`;
   }
 }
+
+// Drag-and-drop for sequence items
+function seqDragStart(e, idx) { seqDragSrcIdx = idx; e.currentTarget.style.opacity = '0.4'; e.dataTransfer.effectAllowed = 'move'; }
+function seqDragOver(e) { e.preventDefault(); e.dataTransfer.dropEffect = 'move'; }
+function seqDrop(e, targetIdx) {
+  e.preventDefault();
+  if (seqDragSrcIdx < 0 || seqDragSrcIdx === targetIdx) return;
+  const item = seqScripts.splice(seqDragSrcIdx, 1)[0];
+  seqScripts.splice(targetIdx, 0, item);
+  seqDragSrcIdx = -1;
+  seqRenderList();
+}
+function seqDragEnd(e) { seqDragSrcIdx = -1; e.currentTarget.style.opacity = '1'; seqRenderList(); }
 
 function seqAddCurrent() {
   if (!filePath) { toast('No file loaded', 'error'); return; }
@@ -1934,29 +2039,37 @@ function seqAddCurrent() {
   toast('Added: ' + name);
 }
 
+function seqAddAllFiles() {
+  // Add all .urf.json files sorted by name
+  const sorted = [..._availableFiles].filter(f => f.endsWith('.urf.json')).sort((a, b) => a.split('/').pop().localeCompare(b.split('/').pop()));
+  sorted.forEach(f => seqScripts.push({path: f, name: f.split('/').pop(), enabled: true}));
+  seqRenderList();
+  toast('Added ' + sorted.length + ' files');
+}
+
 let _seqPickerOpen = false;
 function seqAddFromList() {
   if (_seqPickerOpen) return;
   if (!_availableFiles.length) { toast('No files found - click Refresh first', 'error'); return; }
   _seqPickerOpen = true;
-  // Build inline file picker dropdown
   const container = document.getElementById('seqFilePicker');
-  const html = `<div style="background:var(--bg);border:1px solid var(--blue);border-radius:6px;max-height:200px;overflow-y:auto;margin-bottom:6px">
-    ${_availableFiles.map((f, i) => {
+  // Always allow adding files, even if already in sequence (user wants duplicates like 1 1 2 3 ...)
+  const sorted = [..._availableFiles].sort((a, b) => a.split('/').pop().localeCompare(b.split('/').pop()));
+  const html = `<div style="background:var(--bg);border:1px solid var(--blue);border-radius:6px;max-height:250px;overflow-y:auto;margin-bottom:6px">
+    ${sorted.map((f, i) => {
       const name = f.split('/').pop();
-      const inSeq = seqScripts.some(s => s.path === f);
-      return `<div class="seq-pick-item" data-idx="${i}" onclick="seqPickFile('${f.replace(/'/g, "\\'")}')"
-        style="padding:5px 8px;cursor:pointer;font-size:12px;display:flex;align-items:center;gap:6px;
-        ${inSeq?'opacity:.5;':''}border-bottom:1px solid var(--border);"
+      const inCount = seqScripts.filter(s => s.path === f).length;
+      return `<div onclick="seqPickFile('${f.replace(/'/g, "\\'")}')"
+        style="padding:5px 8px;cursor:pointer;font-size:12px;display:flex;align-items:center;gap:6px;border-bottom:1px solid var(--border);"
         onmouseover="this.style.background='var(--bg3)'" onmouseout="this.style.background=''">
-        <span style="color:var(--blue);font-size:10px">${inSeq?'&#10003;':''}</span>
+        ${inCount > 0 ? '<span style="color:var(--blue);font-size:9px;min-width:14px">'+inCount+'x</span>' : '<span style="min-width:14px"></span>'}
         <span style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(name)}</span>
       </div>`;
     }).join('')}
   </div>
+  <div style="display:flex;gap:4px;font-size:10px;color:var(--text2);margin-bottom:4px">Click to add (can add same file multiple times)</div>
   <div style="display:flex;gap:4px">
-    <button class="btn btn-sm" onclick="seqPickAddAll()">Add All</button>
-    <button class="btn btn-sm" onclick="seqPickClose()">Close</button>
+    <button class="btn btn-sm" onclick="seqPickClose()">Done</button>
   </div>`;
   container.innerHTML = html;
   container.style.display = 'block';
@@ -1967,20 +2080,11 @@ function seqPickFile(path) {
   seqScripts.push({path, name, enabled: true});
   seqRenderList();
   toast('Added: ' + name);
-  seqPickClose();
-}
-
-function seqPickAddAll() {
-  let count = 0;
-  _availableFiles.forEach(f => {
-    if (!seqScripts.some(s => s.path === f)) {
-      seqScripts.push({path: f, name: f.split('/').pop(), enabled: true});
-      count++;
-    }
-  });
-  seqRenderList();
-  seqPickClose();
-  toast('Added ' + count + ' files');
+  // Don't close - allow adding multiple files quickly
+  // Update count badges in picker
+  const container = document.getElementById('seqFilePicker');
+  if (container && _seqPickerOpen) seqAddFromList();  // refresh picker
+  _seqPickerOpen = false;  // seqAddFromList will set it true again
 }
 
 function seqPickClose() {
@@ -1991,6 +2095,7 @@ function seqPickClose() {
 
 function seqToggle(i, checked) { seqScripts[i].enabled = checked; seqRenderList(); }
 function seqRemove(i) { seqScripts.splice(i, 1); seqRenderList(); }
+function seqDuplicate(i) { seqScripts.splice(i + 1, 0, {...seqScripts[i]}); seqRenderList(); }
 function seqMoveUp(i) { if (i <= 0) return; [seqScripts[i-1], seqScripts[i]] = [seqScripts[i], seqScripts[i-1]]; seqRenderList(); }
 function seqMoveDown(i) { if (i >= seqScripts.length-1) return; [seqScripts[i], seqScripts[i+1]] = [seqScripts[i+1], seqScripts[i]]; seqRenderList(); }
 function seqClear() { seqScripts = []; seqRenderList(); }
@@ -2308,27 +2413,8 @@ async function startPlay() {
 async function startRecord() {
   // Auto-create a new recording if none is loaded
   if (!recording) {
-    const pkg = prompt('Enter app package name to record (e.g. com.example.app):');
-    if (!pkg) return;
-    recording = {
-      version: 2,
-      meta: { name: 'New Recording', created: new Date().toISOString(), device: '',
-              screen_width: screenNaturalW || 1080, screen_height: screenNaturalH || 2400,
-              app_package: pkg, recording_mode: 'mixed', total_duration_ms: 0 },
-      settings: { loop: false, loop_count: 0, loop_delay: 5, speed: 1.0,
-                  on_error: 'retry', max_retries: 3, retry_delay: 2.0,
-                  screenshot_dir: '/img/captures',
-                  send_to: { method: 'cp', path: '/img/sent' },
-                  notify: true, notify_method: 'stdout', notify_url: '' },
-      frames: [],
-    };
-    // Generate unique filename with sequential numbering (station-001, station-002, ...)
-    const baseName = pkg.split('.').pop();
-    const ts = new Date().toISOString().replace(/[:.]/g,'-').slice(0,19);
-    filePath = '/work/' + baseName + '-' + ts + '.urf.json';
-    document.getElementById('fileName').textContent = filePath.split('/').pop();
-    refreshAll();
-    loadFileList();
+    newRecording();
+    if (!recording) return;  // user cancelled
   }
   const pkg = recording.meta?.app_package || '';
   if (!pkg) {
@@ -4177,8 +4263,13 @@ class EditorHandler(BaseHTTPRequestHandler):
         """List all extract JSONL log files in the work/logs directory."""
         log_dir = Path(self.work_dir) / "logs"
         logs = []
+        seen_paths: set = set()
         if log_dir.exists():
+            # Per-recording logs: station-01-extract.jsonl
             for p in sorted(log_dir.glob("*-extract.jsonl")):
+                if str(p) in seen_paths:
+                    continue
+                seen_paths.add(str(p))
                 line_count = self._count_lines(p)
                 logs.append({
                     "path": str(p),
@@ -4187,8 +4278,11 @@ class EditorHandler(BaseHTTPRequestHandler):
                     "entries": line_count,
                     "size_kb": round(p.stat().st_size / 1024, 1),
                 })
-            # Also include playback extract logs
+            # Legacy per-label logs: extract-ctrl_capture_5.jsonl
             for p in sorted(log_dir.glob("extract-*.jsonl")):
+                if str(p) in seen_paths:
+                    continue
+                seen_paths.add(str(p))
                 line_count = self._count_lines(p)
                 logs.append({
                     "path": str(p),
