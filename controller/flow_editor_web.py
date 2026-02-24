@@ -2784,9 +2784,11 @@ function initScreenTouch() {
 // Track Ctrl press timing for recording capture
 let ctrlDownTime = 0;
 let ctrlCaptureTriggered = false;
+let ctrlCaptureInFlight = false;  // prevent concurrent capture API calls
 
 document.addEventListener('keydown', (e) => {
   if (e.key === 'Control') {
+    if (e.repeat) return; // Ignore held-down key repeats
     ctrlHeld = true;
     ctrlDownTime = Date.now();
     ctrlCaptureTriggered = false;
@@ -2830,6 +2832,7 @@ window.addEventListener('blur', () => {
 // ============================================================
 async function captureCtrlFrame() {
   if (!webRecording || !recording) return;
+  if (ctrlCaptureInFlight) return; // prevent concurrent captures from piling up
 
   const t = Date.now() - webRecStartTime;
   const captureId = nextId();
@@ -2861,6 +2864,7 @@ async function captureCtrlFrame() {
   toast('Ctrl Capture #' + captureId + ' at ' + formatElapsed(t), 'success');
 
   // Also fetch current screen elements for logging
+  ctrlCaptureInFlight = true;
   try {
     const elData = await api('GET', '/elements');
     if (elData && elData.elements) {
@@ -2874,6 +2878,8 @@ async function captureCtrlFrame() {
     }
   } catch (err) {
     // Non-fatal: log capture still saved
+  } finally {
+    ctrlCaptureInFlight = false;
   }
 }
 
