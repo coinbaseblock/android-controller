@@ -15,6 +15,7 @@ Frame types:
   - "wait"     : Explicit pause
   - "shell"    : Run an adb shell command
   - "marker"   : User bookmark / annotation (no action)
+  - "extract"  : Capture UI data from screen and save to log (for data collection)
 
 File structure:
 {
@@ -115,6 +116,20 @@ File structure:
       "t": 9000,
       "type": "marker",
       "note": "User checked screen manually here"
+    },
+    {
+      "id": 10,
+      "t": 10000,
+      "type": "extract",
+      "extract_label": "station_status",     // label for this extraction point
+      "extract_fields": [                     // list of fields to extract from UI
+        {"name": "station_name", "resource_id": "com.example:id/name", "text_match": ""},
+        {"name": "status",       "resource_id": "", "text_match": "พร้อมใช้งาน|ไม่พร้อม"},
+        {"name": "connector",    "resource_id": "com.example:id/type", "text_match": ""}
+      ],
+      "extract_all_text": true,              // also capture all visible text on screen
+      "extract_screenshot": true,            // take screenshot with extraction
+      "note": "Capture EV station info"
     }
   ]
 }
@@ -139,7 +154,7 @@ KEY_NAMES = {
 class Frame:
     id: int = 0
     t: int = 0                      # ms offset from start
-    type: str = "touch"             # touch|gesture|element|app|key|screenshot|wait|shell|marker
+    type: str = "touch"             # touch|gesture|element|app|key|screenshot|wait|shell|marker|extract
     action: str = ""                # depends on type
     # touch / gesture
     x: int = 0
@@ -168,6 +183,11 @@ class Frame:
     # (uses duration_ms)
     # shell
     command: str = ""
+    # extract (data collection)
+    extract_label: str = ""
+    extract_fields: Optional[List[Dict[str, Any]]] = None  # [{name, resource_id, text_match}]
+    extract_all_text: bool = False
+    extract_screenshot: bool = False
     # common
     note: str = ""
     enabled: bool = True            # can disable frames without deleting
@@ -205,6 +225,12 @@ class Frame:
             d["duration_ms"] = self.duration_ms
         elif self.type == "shell":
             d["command"] = self.command
+        elif self.type == "extract":
+            d["extract_label"] = self.extract_label
+            if self.extract_fields:
+                d["extract_fields"] = self.extract_fields
+            d["extract_all_text"] = self.extract_all_text
+            d["extract_screenshot"] = self.extract_screenshot
         elif self.type == "marker":
             pass
 

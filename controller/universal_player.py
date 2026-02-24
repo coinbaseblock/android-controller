@@ -36,6 +36,8 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
+import re
 import shutil
 import subprocess
 import sys
@@ -286,6 +288,8 @@ class UniversalPlayer:
                     self._exec_wait(frame)
                 elif frame.type == "shell":
                     self._exec_shell(frame)
+                elif frame.type == "extract":
+                    self._exec_extract(frame, idx, loop_idx)
                 elif frame.type == "marker":
                     self.log(f"  Marker: {frame.note}")
 
@@ -495,6 +499,94 @@ class UniversalPlayer:
         prefix = adb_cmd(self.serial)
         run_adb(prefix + ["shell"] + frame.command.split())
 
+    def _exec_extract(self, frame: Frame, idx: int, loop_idx: int) -> None:
+        """Extract UI data from current screen and save to log."""
+        label = frame.extract_label or f"extract_{idx}"
+        self.log(f"  Extract: {label}", "STEP")
+
+        # Get current UI hierarchy
+        xml_str = get_ui_xml(self.serial)
+        elements = parse_all_elements(xml_str)
+
+        result: Dict[str, Any] = {
+            "timestamp": datetime.now().isoformat(),
+            "loop": loop_idx,
+            "step": idx,
+            "label": label,
+        }
+
+        # Extract specific fields if configured
+        if frame.extract_fields:
+            fields_data: Dict[str, Any] = {}
+            for field_def in frame.extract_fields:
+                fname = field_def.get("name", "")
+                rid = field_def.get("resource_id", "")
+                text_match = field_def.get("text_match", "")
+
+                matched_values = []
+                for el in elements:
+                    # Match by resource_id
+                    if rid and hasattr(el, "resource_id") and rid in getattr(el, "resource_id", ""):
+                        matched_values.append({
+                            "text": getattr(el, "text", ""),
+                            "resource_id": getattr(el, "resource_id", ""),
+                            "class": getattr(el, "class_name", ""),
+                            "bounds": getattr(el, "bounds", []),
+                        })
+                    # Match by text pattern (regex)
+                    elif text_match and hasattr(el, "text"):
+                        el_text = getattr(el, "text", "")
+                        if el_text and re.search(text_match, el_text):
+                            matched_values.append({
+                                "text": el_text,
+                                "resource_id": getattr(el, "resource_id", ""),
+                                "class": getattr(el, "class_name", ""),
+                                "bounds": getattr(el, "bounds", []),
+                            })
+
+                if len(matched_values) == 1:
+                    fields_data[fname] = matched_values[0]
+                elif matched_values:
+                    fields_data[fname] = matched_values
+                else:
+                    fields_data[fname] = None
+
+            result["fields"] = fields_data
+
+        # Capture all visible text if requested
+        if frame.extract_all_text:
+            all_texts = []
+            for el in elements:
+                text = getattr(el, "text", "")
+                if text and text.strip():
+                    all_texts.append({
+                        "text": text.strip(),
+                        "resource_id": getattr(el, "resource_id", ""),
+                        "class": getattr(el, "class_name", ""),
+                    })
+            result["all_text"] = all_texts
+
+        # Take screenshot if requested
+        if frame.extract_screenshot:
+            ts = datetime.now().strftime("%Y%m%d-%H%M%S")
+            filename = f"extract-loop{loop_idx:04d}-{ts}-{label}.png"
+            out_dir = Path(self.recording.settings.screenshot_dir)
+            out_path = out_dir / filename
+            try:
+                take_screenshot(self.serial, out_path)
+                result["screenshot"] = str(out_path)
+            except Exception:
+                result["screenshot"] = None
+
+        # Write to extraction log (JSONL format - one JSON per line, append-friendly)
+        log_dir = Path(self.recording.settings.screenshot_dir).parent / "logs"
+        log_dir.mkdir(parents=True, exist_ok=True)
+        log_file = log_dir / f"extract-{label}.jsonl"
+        with open(log_file, "a", encoding="utf-8") as f:
+            f.write(json.dumps(result, ensure_ascii=False) + "\n")
+
+        self.log(f"  Extracted {len(result.get('fields', {}))} fields -> {log_file}", "OK")
+
     # ---------- Helpers ----------
 
     def _describe_frame(self, frame: Frame) -> str:
@@ -517,6 +609,8 @@ class UniversalPlayer:
             return f"wait {frame.duration_ms}ms"
         elif frame.type == "shell":
             return f"shell: {frame.command}"
+        elif frame.type == "extract":
+            return f"extract: {frame.extract_label or 'data'}"
         elif frame.type == "marker":
             return f"marker: {frame.note}"
         return f"{frame.type}: {frame.action}"
