@@ -261,6 +261,11 @@ class ProcessManager:
 # Global process manager
 _proc_manager = ProcessManager()
 
+# UI dump cache for Ctrl+hover inspect (avoids repeated slow uiautomator dumps)
+_ui_dump_cache_lock = threading.Lock()
+_ui_dump_cache: dict = {"xml": "", "time": 0.0, "serial": ""}
+_UI_DUMP_TTL = 3.0  # seconds
+
 
 EDITOR_HTML = r"""<!DOCTYPE html>
 <html lang="th">
@@ -856,6 +861,8 @@ let ctrlHeld = false;
 let inspectDebounceTimer = 0;
 let inspectTooltipEl = null;
 let inspectHighlightEls = [];
+let inspectRequestId = 0;   // monotonic counter to discard stale responses
+let inspectBusy = false;     // guard against overlapping API calls
 
 const FRAME_TYPES = [
   {type:'gesture',  icon:'👆', name:'Gesture',    desc:'Tap / Swipe / Long Press'},
@@ -2304,16 +2311,24 @@ function initScreenTouch() {
     const dev = screenPosToDevice(px, py);
     if (!dev) return;
 
-    // Debounce: only fetch every 250ms
+    // Debounce: short delay so rapid mouse moves collapse into one request.
+    // Skip if a previous request is still in-flight to avoid queuing.
     clearTimeout(inspectDebounceTimer);
     inspectDebounceTimer = setTimeout(async () => {
+      if (inspectBusy) return;        // previous request still running
+      const myId = ++inspectRequestId;
+      inspectBusy = true;
       try {
         const data = await api('POST', '/inspect', { x: dev.x, y: dev.y });
-        showInspectTooltip(container, px, py, dev.x, dev.y, data);
+        if (myId === inspectRequestId && ctrlHeld) {
+          showInspectTooltip(container, px, py, dev.x, dev.y, data);
+        }
       } catch (err) {
         // ignore
+      } finally {
+        inspectBusy = false;
       }
-    }, 250);
+    }, 120);
   });
 }
 
@@ -2321,12 +2336,32 @@ function initScreenTouch() {
 // CTRL+HOVER ELEMENT INSPECTION
 // ============================================================
 document.addEventListener('keydown', (e) => {
-  if (e.key === 'Control') ctrlHeld = true;
+  if (e.key === 'Control') {
+    ctrlHeld = true;
+    // Show cursor change immediately so user knows inspect mode is active
+    const sc = document.getElementById('screenContainer');
+    if (sc) sc.style.cursor = 'crosshair';
+  }
 });
 document.addEventListener('keyup', (e) => {
   if (e.key === 'Control') {
     ctrlHeld = false;
+    clearTimeout(inspectDebounceTimer);
+    inspectRequestId++;          // invalidate any in-flight request
     hideInspectTooltip();
+    const sc = document.getElementById('screenContainer');
+    if (sc) sc.style.cursor = '';
+  }
+});
+// Also handle window blur (e.g. Alt+Tab while Ctrl held)
+window.addEventListener('blur', () => {
+  if (ctrlHeld) {
+    ctrlHeld = false;
+    clearTimeout(inspectDebounceTimer);
+    inspectRequestId++;
+    hideInspectTooltip();
+    const sc = document.getElementById('screenContainer');
+    if (sc) sc.style.cursor = '';
   }
 });
 
@@ -2831,6 +2866,13 @@ class EditorHandler(BaseHTTPRequestHandler):
         except Exception as e:
             return {"ok": False, "error": str(e), "devices": [], "count": 0}
 
+    @staticmethod
+    def _invalidate_ui_dump_cache() -> None:
+        """Clear the cached UI dump so the next inspect fetches fresh data."""
+        with _ui_dump_cache_lock:
+            _ui_dump_cache["xml"] = ""
+            _ui_dump_cache["time"] = 0.0
+
     def _device_tap(self, body: dict) -> dict:
         """Send tap event to device via ADB."""
         x = int(body.get("x", 0))
@@ -2844,6 +2886,7 @@ class EditorHandler(BaseHTTPRequestHandler):
             )
             if result.returncode != 0:
                 return {"ok": False, "error": result.stderr.strip()[:200]}
+            self._invalidate_ui_dump_cache()
             return {"ok": True}
         except Exception as e:
             return {"ok": False, "error": str(e)}
@@ -2864,6 +2907,7 @@ class EditorHandler(BaseHTTPRequestHandler):
             )
             if result.returncode != 0:
                 return {"ok": False, "error": result.stderr.strip()[:200]}
+            self._invalidate_ui_dump_cache()
             return {"ok": True}
         except Exception as e:
             return {"ok": False, "error": str(e)}
@@ -2882,6 +2926,7 @@ class EditorHandler(BaseHTTPRequestHandler):
             )
             if result.returncode != 0:
                 return {"ok": False, "error": result.stderr.strip()[:200]}
+            self._invalidate_ui_dump_cache()
             return {"ok": True}
         except Exception as e:
             return {"ok": False, "error": str(e)}
@@ -2905,6 +2950,7 @@ class EditorHandler(BaseHTTPRequestHandler):
             )
             if result.returncode != 0:
                 return {"ok": False, "error": result.stderr.strip()[:200]}
+            self._invalidate_ui_dump_cache()
             return {"ok": True}
         except Exception as e:
             return {"ok": False, "error": str(e)}
@@ -2930,6 +2976,9 @@ class EditorHandler(BaseHTTPRequestHandler):
 
         Returns all elements containing the point, plus all text content
         found at and around that position.
+
+        Uses a cached UI dump (TTL = _UI_DUMP_TTL seconds) to avoid
+        repeated slow uiautomator dump calls during Ctrl+hover.
         """
         x = int(body.get("x", 0))
         y = int(body.get("y", 0))
@@ -2939,22 +2988,40 @@ class EditorHandler(BaseHTTPRequestHandler):
             prefix = ["adb", "-s", serial] if serial else ["adb"]
             remote = "/sdcard/window_dump.xml"
 
-            # Dump UI hierarchy
-            subprocess.run(
-                prefix + ["shell", "uiautomator", "dump", remote],
-                capture_output=True, text=True, timeout=15,
-            )
+            # Use cached UI dump if still fresh
+            xml_text = ""
+            now = time.time()
+            with _ui_dump_cache_lock:
+                if (
+                    _ui_dump_cache["xml"]
+                    and _ui_dump_cache["serial"] == serial
+                    and (now - _ui_dump_cache["time"]) < _UI_DUMP_TTL
+                ):
+                    xml_text = _ui_dump_cache["xml"]
 
-            # Read XML
-            r2 = subprocess.run(
-                prefix + ["exec-out", "cat", remote],
-                capture_output=True, text=True, timeout=10,
-            )
+            if not xml_text:
+                # Dump UI hierarchy
+                subprocess.run(
+                    prefix + ["shell", "uiautomator", "dump", remote],
+                    capture_output=True, text=True, timeout=15,
+                )
 
-            if r2.returncode != 0 or not r2.stdout.strip():
-                return {"error": "UI dump failed", "elements": [], "all_text": []}
+                # Read XML
+                r2 = subprocess.run(
+                    prefix + ["exec-out", "cat", remote],
+                    capture_output=True, text=True, timeout=10,
+                )
 
-            root = _ET.fromstring(r2.stdout)
+                if r2.returncode != 0 or not r2.stdout.strip():
+                    return {"error": "UI dump failed", "elements": [], "all_text": []}
+
+                xml_text = r2.stdout
+                with _ui_dump_cache_lock:
+                    _ui_dump_cache["xml"] = xml_text
+                    _ui_dump_cache["time"] = time.time()
+                    _ui_dump_cache["serial"] = serial
+
+            root = _ET.fromstring(xml_text)
             bounds_pat = _re.compile(r"\[(\d+),(\d+)\]\[(\d+),(\d+)\]")
 
             elements: list = []
