@@ -456,6 +456,9 @@ input:focus, select:focus, textarea:focus { outline: none; border-color: var(--b
 .file-item { padding: 6px 8px; border-radius: 4px; cursor: pointer; font-size: 13px; display: flex; align-items: center; gap: 6px; }
 .file-item:hover { background: var(--bg3); }
 .file-item.active { background: #1f6feb33; color: var(--blue); }
+.btn-delete-file { background: none; border: none; color: var(--text2); cursor: pointer; font-size: 16px; padding: 0 4px; line-height: 1; border-radius: 3px; opacity: 0; transition: all .15s; flex-shrink: 0; }
+.file-item:hover .btn-delete-file { opacity: 1; }
+.btn-delete-file:hover { color: #f85149; background: rgba(248,81,73,.15); }
 .file-icon { font-size: 11px; opacity: .6; }
 .meta-row { display: flex; justify-content: space-between; font-size: 12px; margin-bottom: 4px; }
 .meta-row .label { color: var(--text2); }
@@ -750,6 +753,24 @@ input:focus, select:focus, textarea:focus { outline: none; border-color: var(--b
   padding: 6px 10px; display: flex; gap: 4px; flex-wrap: wrap; flex-shrink: 0;
   border-bottom: 1px solid var(--border);
 }
+.swipe-controls {
+  padding: 8px 10px; display: flex; align-items: center; gap: 8px; flex-shrink: 0;
+  border-bottom: 1px solid var(--border);
+}
+.swipe-dpad {
+  display: grid; grid-template-columns: 36px 36px 36px; grid-template-rows: 36px 36px 36px; gap: 2px;
+}
+.swipe-dpad .btn-swipe {
+  width: 36px; height: 36px; border: 1px solid var(--border); border-radius: 4px;
+  background: var(--bg2); color: var(--text); font-size: 16px; cursor: pointer;
+  display: flex; align-items: center; justify-content: center; transition: all .15s; padding: 0;
+}
+.swipe-dpad .btn-swipe:hover { background: var(--bg3); border-color: var(--blue); }
+.swipe-dpad .btn-swipe:active { transform: scale(0.9); background: var(--blue); color: #fff; }
+.swipe-dpad .btn-swipe.placeholder { visibility: hidden; }
+.swipe-settings { display: flex; flex-direction: column; gap: 4px; font-size: 11px; }
+.swipe-settings label { color: var(--text2); }
+.swipe-settings input { width: 64px; }
 .device-status {
   padding: 5px 12px; font-size: 11px; color: var(--text2);
   text-align: center; flex-shrink: 0; border-top: 1px solid var(--border);
@@ -983,6 +1004,26 @@ input:focus, select:focus, textarea:focus { outline: none; border-color: var(--b
             <button class="btn btn-sm" onclick="rotateScreen()" title="Rotate">Rotate</button>
             <button class="btn btn-sm" onclick="sendKey(224)" title="Wake Up">Wake</button>
           </div>
+          <!-- Swipe Controls -->
+          <div class="swipe-controls">
+            <div class="swipe-dpad">
+              <div class="btn-swipe placeholder"></div>
+              <button class="btn-swipe" onclick="sendSwipe('up')" title="Swipe Up">&#9650;</button>
+              <div class="btn-swipe placeholder"></div>
+              <button class="btn-swipe" onclick="sendSwipe('left')" title="Swipe Left">&#9664;</button>
+              <div class="btn-swipe placeholder"></div>
+              <button class="btn-swipe" onclick="sendSwipe('right')" title="Swipe Right">&#9654;</button>
+              <div class="btn-swipe placeholder"></div>
+              <button class="btn-swipe" onclick="sendSwipe('down')" title="Swipe Down">&#9660;</button>
+              <div class="btn-swipe placeholder"></div>
+            </div>
+            <div class="swipe-settings">
+              <label>Distance (px)</label>
+              <input type="number" id="swipeDistance" value="500" min="50" max="2000" step="50" title="Swipe distance in device pixels">
+              <label>Duration (ms)</label>
+              <input type="number" id="swipeDuration" value="300" min="100" max="2000" step="50" title="Swipe duration in ms">
+            </div>
+          </div>
           <div class="device-status" id="deviceStatus">Ready - tap screen to interact</div>
         </div>
       </div>
@@ -1085,8 +1126,9 @@ async function loadFileList() {
   _availableFiles = data.files || [];
   const el = document.getElementById('fileList');
   el.innerHTML = _availableFiles.map(f =>
-    `<div class="file-item ${f===filePath?'active':''}" data-path="${esc(f)}" onclick="loadFile('${f}')">
-      <span class="file-icon">&#128196;</span>${f.split('/').pop()}
+    `<div class="file-item ${f===filePath?'active':''}" data-path="${esc(f)}" style="display:flex;align-items:center;gap:4px">
+      <span style="flex:1;cursor:pointer;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" onclick="loadFile('${f}')"><span class="file-icon">&#128196;</span>${f.split('/').pop()}</span>
+      <button class="btn-delete-file" onclick="event.stopPropagation();deleteFile('${f}')" title="Delete file">&times;</button>
     </div>`
   ).join('') || '<div style="color:var(--text2);padding:8px;font-size:12px">No .urf.json files</div>';
 }
@@ -1100,6 +1142,19 @@ async function loadFile(path) {
   selectedId = -1;
   refreshAll();
   toast('Loaded: ' + path.split('/').pop());
+}
+
+async function deleteFile(path) {
+  const name = path.split('/').pop();
+  if (!confirm('Delete "' + name + '"?')) return;
+  const res = await api('POST', '/delete', {path: path});
+  if (res.ok) {
+    toast('Deleted: ' + name, 'success');
+    if (filePath === path) { recording = null; filePath = ''; document.getElementById('fileName').textContent = 'No file loaded'; refreshAll(); }
+    loadFileList();
+  } else {
+    toast('Delete failed: ' + (res.error || ''), 'error');
+  }
 }
 
 async function saveFile() {
@@ -3020,6 +3075,36 @@ async function sendKey(keycode) {
   }
 }
 
+async function sendSwipe(direction) {
+  const status = document.getElementById('deviceStatus');
+  const distance = parseInt(document.getElementById('swipeDistance').value) || 500;
+  const duration = parseInt(document.getElementById('swipeDuration').value) || 300;
+  // Use screen center as origin, or default 540x1200 if unknown
+  const cx = screenNaturalW ? Math.round(screenNaturalW / 2) : 540;
+  const cy = screenNaturalH ? Math.round(screenNaturalH / 2) : 1200;
+  let x1 = cx, y1 = cy, x2 = cx, y2 = cy;
+  if (direction === 'up')    { y1 = cy + Math.round(distance / 2); y2 = cy - Math.round(distance / 2); }
+  if (direction === 'down')  { y1 = cy - Math.round(distance / 2); y2 = cy + Math.round(distance / 2); }
+  if (direction === 'left')  { x1 = cx + Math.round(distance / 2); x2 = cx - Math.round(distance / 2); }
+  if (direction === 'right') { x1 = cx - Math.round(distance / 2); x2 = cx + Math.round(distance / 2); }
+  status.textContent = 'Swipe ' + direction + ': (' + x1 + ',' + y1 + ') -> (' + x2 + ',' + y2 + ')...';
+
+  // Record swipe frame during web recording
+  addWebRecFrame('swipe', x1, y1, x2, y2, duration);
+
+  try {
+    const res = await api('POST', '/swipe', { x1, y1, x2, y2, duration });
+    if (res.ok) {
+      status.textContent = 'Swiped ' + direction + (webRecording ? ' [REC]' : '');
+      setTimeout(captureScreen, 500);
+    } else {
+      status.textContent = 'Swipe failed: ' + (res.error || '');
+    }
+  } catch (e) {
+    status.textContent = 'Swipe error: ' + e.message;
+  }
+}
+
 async function sendText() {
   const input = document.getElementById('textInput');
   const text = input.value.trim();
@@ -3169,6 +3254,8 @@ class EditorHandler(BaseHTTPRequestHandler):
             self._json(_seq_manager.stop())
         elif path == "/api/sequence/save":
             self._json(self._seq_save(body))
+        elif path == "/api/delete":
+            self._json(self._delete_file(body))
         else:
             self._error(404, "Not Found")
 
@@ -3268,6 +3355,27 @@ class EditorHandler(BaseHTTPRequestHandler):
             if frames:
                 rec_data.setdefault("meta", {})["total_duration_ms"] = max(f.get("t", 0) for f in frames)
             p.write_text(json.dumps(rec_data, indent=2, ensure_ascii=False), encoding="utf-8")
+            return {"ok": True}
+        except Exception as e:
+            return {"error": str(e)}
+
+    def _delete_file(self, body: dict) -> dict:
+        """Delete a .urf.json or .json recording file."""
+        path = body.get("path", "")
+        if not path:
+            return {"error": "No path specified"}
+        p = Path(path)
+        if not p.exists():
+            return {"error": f"File not found: {path}"}
+        # Safety: only allow deleting .json files inside work_dir
+        try:
+            p.resolve().relative_to(Path(self.work_dir).resolve())
+        except ValueError:
+            return {"error": "Cannot delete files outside work directory"}
+        if not p.name.endswith(".json"):
+            return {"error": "Can only delete .json files"}
+        try:
+            p.unlink()
             return {"ok": True}
         except Exception as e:
             return {"error": str(e)}
