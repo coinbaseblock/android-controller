@@ -626,6 +626,11 @@ input:focus, select:focus, textarea:focus { outline: none; border-color: var(--b
   25% { transform: translateX(-4px); }
   75% { transform: translateX(4px); }
 }
+@keyframes ctrlCapturePulse {
+  0% { opacity: 1; transform: translate(-50%, -50%) scale(0.8); }
+  50% { opacity: 1; transform: translate(-50%, -50%) scale(1.1); }
+  100% { opacity: 0; transform: translate(-50%, -50%) scale(1.3); }
+}
 @keyframes spin-play {
   0% { transform: rotate(0deg); }
   100% { transform: rotate(360deg); }
@@ -864,7 +869,8 @@ input:focus, select:focus, textarea:focus { outline: none; border-color: var(--b
       <!-- Sequence Runner -->
       <div class="sidebar-section" data-hover-scope="sequence">
         <h3>Sequence Runner</h3>
-        <div id="seqList" style="max-height:200px;overflow-y:auto;margin-bottom:8px;font-size:12px"></div>
+        <div id="seqList" style="max-height:250px;overflow-y:auto;margin-bottom:8px;font-size:12px"></div>
+        <div id="seqFilePicker" style="display:none;margin-bottom:6px"></div>
         <div class="btn-group" style="flex-wrap:wrap;gap:4px">
           <button class="btn btn-sm" onclick="seqAddCurrent()" title="Add current file to sequence">+ Add Current</button>
           <button class="btn btn-sm" onclick="seqAddFromList()" title="Pick file to add">+ Pick File</button>
@@ -1072,11 +1078,14 @@ async function api(method, path, body) {
   return r.json();
 }
 
+let _availableFiles = [];  // all loadable file paths
+
 async function loadFileList() {
   const data = await api('GET', '/files');
+  _availableFiles = data.files || [];
   const el = document.getElementById('fileList');
-  el.innerHTML = data.files.map(f =>
-    `<div class="file-item ${f===filePath?'active':''}" onclick="loadFile('${f}')">
+  el.innerHTML = _availableFiles.map(f =>
+    `<div class="file-item ${f===filePath?'active':''}" data-path="${esc(f)}" onclick="loadFile('${f}')">
       <span class="file-icon">&#128196;</span>${f.split('/').pop()}
     </div>`
   ).join('') || '<div style="color:var(--text2);padding:8px;font-size:12px">No .urf.json files</div>';
@@ -1488,16 +1497,18 @@ function renderDetail() {
   }
 
   if (f.type === 'key') {
+    const keyOptions = [
+      [4,'BACK'],[3,'HOME'],[26,'POWER'],[82,'MENU'],[187,'APP_SWITCH'],
+      [24,'VOLUME_UP'],[25,'VOLUME_DOWN'],
+      [113,'CTRL_LEFT'],[114,'CTRL_RIGHT'],
+      [57,'ALT_LEFT'],[58,'ALT_RIGHT'],
+      [59,'SHIFT_LEFT'],[60,'SHIFT_RIGHT'],
+      [66,'ENTER'],[67,'DEL'],[61,'TAB'],[111,'ESCAPE'],
+    ];
     html += `
       <div class="field"><label>Keycode</label>
         <select onchange="updateFrameField(${f.id},'keycode',+this.value);updateFrameField(${f.id},'key_name',this.options[this.selectedIndex].text)">
-          <option value="4" ${f.keycode===4?'selected':''}>BACK (4)</option>
-          <option value="3" ${f.keycode===3?'selected':''}>HOME (3)</option>
-          <option value="26" ${f.keycode===26?'selected':''}>POWER (26)</option>
-          <option value="82" ${f.keycode===82?'selected':''}>MENU (82)</option>
-          <option value="187" ${f.keycode===187?'selected':''}>APP_SWITCH (187)</option>
-          <option value="24" ${f.keycode===24?'selected':''}>VOLUME_UP (24)</option>
-          <option value="25" ${f.keycode===25?'selected':''}>VOLUME_DOWN (25)</option>
+          ${keyOptions.map(([kc,kn]) => `<option value="${kc}" ${f.keycode===kc?'selected':''}>${kn} (${kc})</option>`).join('')}
         </select>
       </div>`;
   }
@@ -1674,6 +1685,10 @@ function renderAddForm(type) {
         <option value="4">BACK (4)</option><option value="3">HOME (3)</option>
         <option value="26">POWER (26)</option><option value="82">MENU (82)</option>
         <option value="187">APP_SWITCH (187)</option>
+        <option value="24">VOLUME_UP (24)</option><option value="25">VOLUME_DOWN (25)</option>
+        <option value="113">CTRL_LEFT (113)</option><option value="114">CTRL_RIGHT (114)</option>
+        <option value="66">ENTER (66)</option><option value="67">DEL (67)</option>
+        <option value="61">TAB (61)</option><option value="111">ESCAPE (111)</option>
       </select></div>`;
   } else if (type === 'screenshot') {
     html += `
@@ -1740,7 +1755,7 @@ function confirmAdd() {
   } else if (type === 'key') {
     const kc = +(document.getElementById('addKeycode')?.value || 4);
     f.keycode = kc;
-    f.key_name = {3:'HOME',4:'BACK',26:'POWER',82:'MENU',187:'APP_SWITCH'}[kc] || '';
+    f.key_name = {3:'HOME',4:'BACK',26:'POWER',82:'MENU',187:'APP_SWITCH',24:'VOLUME_UP',25:'VOLUME_DOWN',113:'CTRL_LEFT',114:'CTRL_RIGHT',57:'ALT_LEFT',58:'ALT_RIGHT',59:'SHIFT_LEFT',60:'SHIFT_RIGHT',66:'ENTER',67:'DEL',61:'TAB',111:'ESCAPE'}[kc] || '';
   } else if (type === 'screenshot') {
     f.stage = document.getElementById('addStage')?.value || 'capture';
     f.send = document.getElementById('addSend')?.value === 'true';
@@ -1819,42 +1834,93 @@ function seqRenderList() {
     el.innerHTML = '<div style="color:var(--text2);font-style:italic;padding:4px">No scripts in sequence</div>';
     return;
   }
-  el.innerHTML = seqScripts.map((s, i) => `
-    <div style="display:flex;align-items:center;gap:4px;padding:3px 4px;background:${s.enabled?'var(--bg3)':'var(--bg2)'};border-radius:4px;margin-bottom:2px;${!s.enabled?'opacity:.5':''}">
-      <input type="checkbox" ${s.enabled?'checked':''} onchange="seqToggle(${i},this.checked)" style="margin:0">
-      <span style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${s.path}">${i+1}. ${s.name}</span>
-      <button onclick="seqMoveUp(${i})" style="background:none;border:none;color:var(--text2);cursor:pointer;font-size:10px;padding:0 2px" title="Move up">&uarr;</button>
-      <button onclick="seqMoveDown(${i})" style="background:none;border:none;color:var(--text2);cursor:pointer;font-size:10px;padding:0 2px" title="Move down">&darr;</button>
-      <button onclick="seqRemove(${i})" style="background:none;border:none;color:var(--red);cursor:pointer;font-size:12px;padding:0 2px" title="Remove">&times;</button>
-    </div>
-  `).join('');
+  const letters = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ';
+  el.innerHTML = seqScripts.map((s, i) => {
+    const letter = i < 26 ? letters[i] : (i + 1);
+    const isLast = i === seqScripts.length - 1;
+    return `
+    <div class="seq-item" style="position:relative">
+      <div style="display:flex;align-items:center;gap:4px;padding:4px 6px;background:${s.enabled?'var(--bg3)':'var(--bg2)'};border-radius:6px;border:1px solid ${s.enabled?'var(--border)':'transparent'};${!s.enabled?'opacity:.4':''}">
+        <input type="checkbox" ${s.enabled?'checked':''} onchange="seqToggle(${i},this.checked)" style="margin:0">
+        <span class="seq-letter" style="min-width:22px;height:22px;display:flex;align-items:center;justify-content:center;background:${s.enabled?'var(--blue)':'var(--text2)'};color:#000;border-radius:50%;font-size:10px;font-weight:700">${letter}</span>
+        <span style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:12px" title="${esc(s.path)}">${esc(s.name)}</span>
+        <button onclick="seqMoveUp(${i})" style="background:none;border:none;color:var(--text2);cursor:pointer;font-size:10px;padding:0 2px" title="Move up">&uarr;</button>
+        <button onclick="seqMoveDown(${i})" style="background:none;border:none;color:var(--text2);cursor:pointer;font-size:10px;padding:0 2px" title="Move down">&darr;</button>
+        <button onclick="seqRemove(${i})" style="background:none;border:none;color:var(--red);cursor:pointer;font-size:12px;padding:0 2px" title="Remove">&times;</button>
+      </div>
+      ${!isLast ? '<div style="text-align:center;color:var(--text2);font-size:10px;line-height:1;padding:1px 0">&#9660;</div>' : ''}
+    </div>`;
+  }).join('');
+
+  // Show flow summary
+  const enabled = seqScripts.filter(s => s.enabled);
+  if (enabled.length > 1) {
+    const flowText = enabled.map((s, i) => (i < 26 ? letters[i] : (i+1))).join(' → ');
+    el.innerHTML += '<div style="color:var(--blue);font-size:10px;text-align:center;padding:4px;margin-top:2px;background:var(--bg);border-radius:4px;border:1px dashed var(--border)">' + flowText + (document.getElementById('seqLoop')?.value === 'true' ? ' ↻' : '') + '</div>';
+  }
 }
 
 function seqAddCurrent() {
-  if (!currentPath) { toast('No file loaded', 'error'); return; }
-  const name = currentPath.split('/').pop();
-  seqScripts.push({path: currentPath, name, enabled: true});
+  if (!filePath) { toast('No file loaded', 'error'); return; }
+  const name = filePath.split('/').pop();
+  seqScripts.push({path: filePath, name, enabled: true});
   seqRenderList();
   toast('Added: ' + name);
 }
 
+let _seqPickerOpen = false;
 function seqAddFromList() {
-  // Show a simple prompt-based picker from loaded file list
-  const fileList = document.getElementById('fileList');
-  if (!fileList) return;
-  const items = Array.from(fileList.querySelectorAll('.file-item'));
-  const paths = items.map(i => i.dataset?.path || i.textContent.trim()).filter(Boolean);
-  if (!paths.length) { toast('No files found', 'error'); return; }
-  const msg = paths.map((p, i) => `${i+1}. ${p.split('/').pop()}`).join('\n');
-  const choice = prompt('Pick file number to add:\n' + msg);
-  if (!choice) return;
-  const idx = parseInt(choice) - 1;
-  if (idx >= 0 && idx < paths.length) {
-    const p = paths[idx];
-    seqScripts.push({path: p, name: p.split('/').pop(), enabled: true});
-    seqRenderList();
-    toast('Added: ' + p.split('/').pop());
-  }
+  if (_seqPickerOpen) return;
+  if (!_availableFiles.length) { toast('No files found - click Refresh first', 'error'); return; }
+  _seqPickerOpen = true;
+  // Build inline file picker dropdown
+  const container = document.getElementById('seqFilePicker');
+  const html = `<div style="background:var(--bg);border:1px solid var(--blue);border-radius:6px;max-height:200px;overflow-y:auto;margin-bottom:6px">
+    ${_availableFiles.map((f, i) => {
+      const name = f.split('/').pop();
+      const inSeq = seqScripts.some(s => s.path === f);
+      return `<div class="seq-pick-item" data-idx="${i}" onclick="seqPickFile('${f.replace(/'/g, "\\'")}')"
+        style="padding:5px 8px;cursor:pointer;font-size:12px;display:flex;align-items:center;gap:6px;
+        ${inSeq?'opacity:.5;':''}border-bottom:1px solid var(--border);"
+        onmouseover="this.style.background='var(--bg3)'" onmouseout="this.style.background=''">
+        <span style="color:var(--blue);font-size:10px">${inSeq?'&#10003;':''}</span>
+        <span style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(name)}</span>
+      </div>`;
+    }).join('')}
+  </div>
+  <div style="display:flex;gap:4px">
+    <button class="btn btn-sm" onclick="seqPickAddAll()">Add All</button>
+    <button class="btn btn-sm" onclick="seqPickClose()">Close</button>
+  </div>`;
+  container.innerHTML = html;
+  container.style.display = 'block';
+}
+
+function seqPickFile(path) {
+  const name = path.split('/').pop();
+  seqScripts.push({path, name, enabled: true});
+  seqRenderList();
+  toast('Added: ' + name);
+  seqPickClose();
+}
+
+function seqPickAddAll() {
+  let count = 0;
+  _availableFiles.forEach(f => {
+    if (!seqScripts.some(s => s.path === f)) {
+      seqScripts.push({path: f, name: f.split('/').pop(), enabled: true});
+      count++;
+    }
+  });
+  seqRenderList();
+  seqPickClose();
+  toast('Added ' + count + ' files');
+}
+
+function seqPickClose() {
+  _seqPickerOpen = false;
+  const container = document.getElementById('seqFilePicker');
+  if (container) { container.innerHTML = ''; container.style.display = 'none'; }
 }
 
 function seqToggle(i, checked) { seqScripts[i].enabled = checked; seqRenderList(); }
@@ -2715,17 +2781,30 @@ function initScreenTouch() {
 // ============================================================
 // CTRL+HOVER ELEMENT INSPECTION
 // ============================================================
+// Track Ctrl press timing for recording capture
+let ctrlDownTime = 0;
+let ctrlCaptureTriggered = false;
+
 document.addEventListener('keydown', (e) => {
   if (e.key === 'Control') {
     ctrlHeld = true;
+    ctrlDownTime = Date.now();
+    ctrlCaptureTriggered = false;
     // Show cursor change immediately so user knows inspect mode is active
     const sc = document.getElementById('screenContainer');
     if (sc) sc.style.cursor = 'crosshair';
+
+    // During recording: Ctrl press triggers a capture/extract frame
+    if (webRecording && recording && !ctrlCaptureTriggered) {
+      ctrlCaptureTriggered = true;
+      captureCtrlFrame();
+    }
   }
 });
 document.addEventListener('keyup', (e) => {
   if (e.key === 'Control') {
     ctrlHeld = false;
+    ctrlDownTime = 0;
     clearTimeout(inspectDebounceTimer);
     inspectRequestId++;          // invalidate any in-flight request
     hideInspectTooltip();
@@ -2737,6 +2816,7 @@ document.addEventListener('keyup', (e) => {
 window.addEventListener('blur', () => {
   if (ctrlHeld) {
     ctrlHeld = false;
+    ctrlDownTime = 0;
     clearTimeout(inspectDebounceTimer);
     inspectRequestId++;
     hideInspectTooltip();
@@ -2744,6 +2824,69 @@ window.addEventListener('blur', () => {
     if (sc) sc.style.cursor = '';
   }
 });
+
+// ============================================================
+// CTRL CAPTURE DURING RECORDING
+// ============================================================
+async function captureCtrlFrame() {
+  if (!webRecording || !recording) return;
+
+  const t = Date.now() - webRecStartTime;
+  const captureId = nextId();
+
+  // Add extract frame that captures all visible text + screenshot
+  const f = {
+    id: captureId,
+    t: t,
+    type: 'extract',
+    extract_label: 'ctrl_capture_' + captureId,
+    extract_all_text: true,
+    extract_screenshot: true,
+    extract_fields: [],
+    enabled: true,
+    note: 'Ctrl capture at ' + formatElapsed(t),
+  };
+  recording.frames.push(f);
+  webRecFrameCount++;
+
+  // Update UI
+  renderTimeline();
+  const tl = document.getElementById('timeline');
+  if (tl) tl.scrollTop = tl.scrollHeight;
+  const stepInfo = document.getElementById('stepInfo');
+  if (stepInfo) stepInfo.textContent = webRecFrameCount + ' frames';
+
+  // Show visual feedback
+  showCtrlCaptureFeedback();
+  toast('Ctrl Capture #' + captureId + ' at ' + formatElapsed(t), 'success');
+
+  // Also fetch current screen elements for logging
+  try {
+    const elData = await api('GET', '/elements');
+    if (elData && elData.elements) {
+      const textElements = elData.elements
+        .filter(el => el.text && el.text.trim())
+        .map(el => el.text.trim());
+      if (textElements.length) {
+        f.note += ' | texts: ' + textElements.slice(0, 10).join(', ');
+        renderTimeline();
+      }
+    }
+  } catch (err) {
+    // Non-fatal: log capture still saved
+  }
+}
+
+function showCtrlCaptureFeedback() {
+  const indicator = document.createElement('div');
+  indicator.style.cssText = 'position:fixed;top:50%;left:50%;transform:translate(-50%,-50%);' +
+    'background:rgba(88,166,255,0.9);color:#fff;padding:12px 24px;border-radius:12px;' +
+    'font-size:16px;font-weight:700;z-index:9999;pointer-events:none;' +
+    'animation:ctrlCapturePulse 0.8s ease-out forwards;';
+  indicator.textContent = 'Ctrl Captured!';
+  document.body.appendChild(indicator);
+  setTimeout(() => indicator.remove(), 1000);
+}
 
 function showInspectTooltip(container, px, py, devX, devY, data) {
   hideInspectTooltip();
@@ -2843,7 +2986,7 @@ async function sendKey(keycode) {
 
   // Record key frame during web recording
   if (webRecording && recording) {
-    const keyNames = {3:'HOME',4:'BACK',24:'VOLUME_UP',25:'VOLUME_DOWN',26:'POWER',66:'ENTER',67:'DEL',82:'MENU',187:'APP_SWITCH',224:'WAKEUP'};
+    const keyNames = {3:'HOME',4:'BACK',24:'VOLUME_UP',25:'VOLUME_DOWN',26:'POWER',57:'ALT_LEFT',58:'ALT_RIGHT',59:'SHIFT_LEFT',60:'SHIFT_RIGHT',61:'TAB',66:'ENTER',67:'DEL',82:'MENU',111:'ESCAPE',113:'CTRL_LEFT',114:'CTRL_RIGHT',187:'APP_SWITCH',224:'WAKEUP'};
     const f = {
       id: nextId(),
       t: Date.now() - webRecStartTime,
