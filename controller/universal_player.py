@@ -61,6 +61,13 @@ try:
 except ImportError:
     DebugServer = None  # type: ignore[assignment,misc]
 
+# Playback logger
+try:
+    from playback_logger import PlaybackLogger, build_ctrl_details
+except ImportError:
+    PlaybackLogger = None  # type: ignore[assignment,misc]
+    build_ctrl_details = None  # type: ignore[assignment]
+
 
 class PlaybackState:
     """State shared with debug server."""
@@ -96,6 +103,7 @@ class UniversalPlayer:
     def __init__(
         self,
         recording: UniversalRecording,
+        recording_path: Optional[Path] = None,
         replay_mode: str = "auto",
         speed: float = 1.0,
         loop: Optional[bool] = None,
@@ -104,6 +112,7 @@ class UniversalPlayer:
         debug_port: int = 0,
     ):
         self.recording = recording
+        self.recording_path = recording_path
         self.replay_mode = replay_mode
         self.speed = speed
         self.dry_run = dry_run
@@ -129,8 +138,26 @@ class UniversalPlayer:
         self._frames = self._prepare_frames()
         self.state.total_steps = len(self._frames)
 
+        # JSON playback logger
+        self._logger: Any = None
+        if recording_path and PlaybackLogger is not None:
+            meta = recording.meta
+            self._logger = PlaybackLogger(
+                recording_path=recording_path,
+                recording_name=meta.name,
+                app_package=meta.app_package,
+                device=meta.device,
+                screen_width=meta.screen_width,
+                screen_height=meta.screen_height,
+                replay_mode=replay_mode,
+                speed=speed,
+                total_frames=len(self._frames),
+            )
+
         if debug_port > 0 and DebugServer is not None:
-            self._debug_server = DebugServer(self.state, port=debug_port)
+            self._debug_server = DebugServer(
+                self.state, port=debug_port, playback_logger=self._logger,
+            )
 
     @property
     def serial(self) -> Optional[str]:
@@ -175,6 +202,10 @@ class UniversalPlayer:
             self._debug_server.start()
             self.log(f"Debug server: port {self._debug_server.port}")
 
+        if self._logger:
+            self.log(f"JSON log: {self._logger.log_path}")
+            self.log(f"Log viewer: {self._logger.viewer_path}")
+
         self._running = True
         loop_idx = 0
 
@@ -207,6 +238,9 @@ class UniversalPlayer:
             self.log("Player stopped.")
 
     def _play_one_loop(self, loop_idx: int) -> bool:
+        if self._logger:
+            self._logger.start_loop(loop_idx)
+
         # Record the wall-clock moment this loop started.  All frame delays are
         # calculated as absolute offsets from this point so that execution time
         # of each frame does not accumulate into the next frame's delay.
@@ -244,7 +278,23 @@ class UniversalPlayer:
                     time.sleep(target_wall - now)
 
             # Execute
+            frame_start = time.time()
             success = self._execute_frame(frame, i, loop_idx)
+            frame_exec_ms = int((time.time() - frame_start) * 1000)
+
+            # Log this ctrl to JSON logger
+            if self._logger and build_ctrl_details is not None:
+                self._logger.log_ctrl(
+                    frame_id=frame.id,
+                    index=i,
+                    frame_type=frame.type,
+                    action=frame.action,
+                    description=self._describe_frame(frame),
+                    result="success" if success else "error",
+                    error=self.state.last_error if not success else None,
+                    exec_ms=frame_exec_ms,
+                    details=build_ctrl_details(frame),
+                )
 
             if not success:
                 if self.on_error == "skip":
@@ -255,11 +305,15 @@ class UniversalPlayer:
                 elif self.on_error == "stop":
                     self.log("Stopping due to error.", "ERROR")
                     self._running = False
+                    if self._logger:
+                        self._logger.end_loop(False)
                     return False
                 # "retry" is handled inside _execute_frame
 
         # Flush any remaining touch buffer at end of loop
         self._flush_touch_buffer()
+        if self._logger:
+            self._logger.end_loop(True)
         return True
 
     def _execute_frame(self, frame: Frame, idx: int, loop_idx: int) -> bool:
@@ -738,6 +792,7 @@ def main() -> int:
 
     player = UniversalPlayer(
         recording=recording,
+        recording_path=args.recording.resolve(),
         replay_mode=args.replay_mode,
         speed=speed,
         loop=loop_flag,

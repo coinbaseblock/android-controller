@@ -122,6 +122,7 @@ body { font-family: 'Segoe UI', system-ui, sans-serif; background: #0f1117; colo
             </div>
             <div style="margin-top: 16px;">
                 <button class="btn btn-secondary" onclick="refreshNow()">Refresh Now</button>
+                <a href="/logs" target="_blank" class="btn btn-secondary" style="text-decoration:none;display:inline-block">View JSON Log</a>
                 <label style="margin-left: 16px; font-size: 13px;">
                     <input type="checkbox" id="autoRefresh" checked> Auto-refresh (2s)
                 </label>
@@ -233,9 +234,253 @@ fetchState();
 </html>"""
 
 
+# Live log viewer - fetches data from /api/playback-log with auto-refresh
+LOG_VIEWER_HTML = """<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Playback Log Viewer</title>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:'Segoe UI',system-ui,sans-serif;background:#0f1117;color:#e1e4e8;line-height:1.5}
+.header{background:#161b22;padding:16px 24px;border-bottom:1px solid #30363d;display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px}
+.header h1{font-size:18px;font-weight:600}
+.rec-name{color:#58a6ff;font-size:14px}
+.toolbar{display:flex;gap:8px;align-items:center}
+.toolbar label{font-size:13px;color:#8b949e}
+.container{max-width:1400px;margin:0 auto;padding:20px}
+.info-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:12px;margin-bottom:24px}
+.info-card{background:#161b22;border:1px solid #30363d;border-radius:8px;padding:12px 16px}
+.info-label{font-size:11px;color:#8b949e;text-transform:uppercase;letter-spacing:.5px}
+.info-value{font-size:16px;font-weight:600;color:#c9d1d9;margin-top:2px}
+.run-card{background:#161b22;border:1px solid #30363d;border-radius:8px;margin-bottom:16px;overflow:hidden}
+.run-header{padding:12px 16px;cursor:pointer;display:flex;justify-content:space-between;align-items:center;background:#161b22;border-bottom:1px solid #21262d;transition:background .15s}
+.run-header:hover{background:#1c2129}
+.run-header .left{display:flex;align-items:center;gap:12px}
+.loop-num{font-weight:700;font-size:16px;color:#58a6ff}
+.run-time{font-size:13px;color:#8b949e}
+.badge{padding:2px 10px;border-radius:10px;font-size:12px;font-weight:600;text-transform:uppercase}
+.badge-success{background:#1f3d2a;color:#3fb950}
+.badge-error{background:#3d1f1f;color:#f85149}
+.badge-running{background:#1f303d;color:#58a6ff}
+.run-body{display:none;padding:0}
+.run-body.open{display:block}
+.ctrl-table{width:100%;border-collapse:collapse;font-size:13px}
+.ctrl-table th{text-align:left;padding:8px 12px;background:#0d1117;color:#8b949e;font-weight:600;font-size:11px;text-transform:uppercase;letter-spacing:.5px;position:sticky;top:0}
+.ctrl-table td{padding:6px 12px;border-bottom:1px solid #21262d;vertical-align:top}
+.ctrl-table tr:hover{background:#1c2129}
+.ctrl-table tr.error-row{background:#1f121544}
+.type-badge{display:inline-block;padding:1px 8px;border-radius:4px;font-size:11px;font-weight:600;min-width:65px;text-align:center}
+.type-touch{background:#3d2f1f;color:#d29922}
+.type-gesture{background:#1f3d2a;color:#3fb950}
+.type-element{background:#1f2a3d;color:#58a6ff}
+.type-app{background:#2d1f3d;color:#bc8cff}
+.type-key{background:#1f3d3d;color:#39d2c0}
+.type-screenshot{background:#3d3d1f;color:#d2d239}
+.type-wait{background:#21262d;color:#8b949e}
+.type-shell{background:#2a1f1f;color:#f0883e}
+.type-extract{background:#1f3d33;color:#3fb9a0}
+.type-marker{background:#21262d;color:#8b949e}
+.result-ok{color:#3fb950}
+.result-err{color:#f85149}
+.ts-col{color:#8b949e;font-family:'Consolas',monospace;font-size:12px;white-space:nowrap}
+.desc-col{max-width:400px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.detail-toggle{cursor:pointer;color:#58a6ff;font-size:11px;margin-left:4px}
+.detail-toggle:hover{text-decoration:underline}
+.detail-row{display:none;background:#0d1117}
+.detail-row.open{display:table-row}
+.detail-row td{padding:8px 16px}
+.detail-json{font-family:'Consolas',monospace;font-size:12px;color:#c9d1d9;white-space:pre-wrap;word-break:break-all;background:#0d1117;padding:8px 12px;border-radius:4px;max-height:300px;overflow-y:auto}
+.summary{display:flex;gap:16px;margin-bottom:20px;flex-wrap:wrap}
+.summary-item{font-size:13px;color:#8b949e}
+.summary-item strong{color:#c9d1d9}
+.arrow{display:inline-block;transition:transform .2s;margin-right:6px}
+.arrow.open{transform:rotate(90deg)}
+.run-stats{display:flex;gap:16px;font-size:12px;color:#8b949e;padding:8px 16px;border-top:1px solid #21262d;background:#0d1117}
+.run-stats .stat{display:flex;align-items:center;gap:4px}
+.search-bar{margin-bottom:16px}
+.search-bar input{width:100%;padding:8px 12px;background:#0d1117;border:1px solid #30363d;border-radius:6px;color:#c9d1d9;font-size:14px;outline:none}
+.search-bar input:focus{border-color:#58a6ff}
+.empty{text-align:center;padding:40px;color:#8b949e}
+.back-link{color:#58a6ff;text-decoration:none;font-size:13px}
+.back-link:hover{text-decoration:underline}
+</style>
+</head>
+<body>
+
+<div class="header">
+    <div>
+        <h1>Playback Log Viewer</h1>
+        <span class="rec-name" id="recName">-</span>
+    </div>
+    <div class="toolbar">
+        <a href="/" class="back-link">&larr; Dashboard</a>
+        <label><input type="checkbox" id="autoRefresh" checked> Auto-refresh (2s)</label>
+    </div>
+</div>
+
+<div class="container">
+    <div class="info-grid" id="infoGrid"></div>
+    <div class="summary" id="summary"></div>
+    <div class="search-bar">
+        <input type="text" id="searchInput" placeholder="Filter by type, action, description..." oninput="filterCtrls()">
+    </div>
+    <div id="runsContainer"><div class="empty">Loading...</div></div>
+</div>
+
+<script>
+let lastRunCount = 0;
+let openRuns = {};
+let openDetails = {};
+
+async function fetchLog() {
+    try {
+        const resp = await fetch('/api/playback-log');
+        const data = await resp.json();
+        if (data && data.recording) renderAll(data);
+    } catch(e) { console.error('Fetch error:', e); }
+}
+
+function renderAll(data) {
+    renderRecInfo(data.recording, data.runs);
+    renderSummary(data.runs);
+    renderRuns(data.runs);
+}
+
+function renderRecInfo(rec, runs) {
+    if (!rec) return;
+    document.getElementById('recName').textContent = rec.name || rec.file || '-';
+    const grid = document.getElementById('infoGrid');
+    const items = [
+        ['Recording', rec.name], ['Device', rec.device], ['App', rec.app_package],
+        ['Screen', rec.screen], ['Mode', rec.replay_mode], ['Speed', rec.speed + 'x'],
+        ['Frames', rec.total_frames], ['Total Runs', runs.length],
+    ];
+    grid.innerHTML = items.map(([l, v]) =>
+        '<div class="info-card"><div class="info-label">' + esc(l) + '</div><div class="info-value">' + esc(String(v || '-')) + '</div></div>'
+    ).join('');
+}
+
+function renderSummary(runs) {
+    const total = runs.length;
+    const success = runs.filter(r => r.status === 'success').length;
+    const errors = runs.filter(r => r.status === 'error').length;
+    const totalCtrls = runs.reduce((s, r) => s + (r.ctrls || []).length, 0);
+    document.getElementById('summary').innerHTML = [
+        '<div class="summary-item">Runs: <strong>' + total + '</strong></div>',
+        '<div class="summary-item" style="color:#3fb950">Success: <strong>' + success + '</strong></div>',
+        '<div class="summary-item" style="color:#f85149">Errors: <strong>' + errors + '</strong></div>',
+        '<div class="summary-item">Total Ctrls: <strong>' + totalCtrls + '</strong></div>',
+    ].join('');
+}
+
+function renderRuns(runs) {
+    const container = document.getElementById('runsContainer');
+    if (!runs || runs.length === 0) {
+        container.innerHTML = '<div class="empty">No runs recorded yet</div>';
+        return;
+    }
+    // Auto-open latest run on new run arrival
+    if (runs.length > lastRunCount) { openRuns[runs.length - 1] = true; }
+    lastRunCount = runs.length;
+    container.innerHTML = runs.map((run, ri) => renderRun(run, ri)).join('');
+    filterCtrls();
+}
+
+function renderRun(run, ri) {
+    const ctrls = run.ctrls || [];
+    const errCount = ctrls.filter(c => c.result === 'error').length;
+    const badgeCls = run.status === 'success' ? 'badge-success' : run.status === 'error' ? 'badge-error' : 'badge-running';
+    const startTime = run.started_at ? fmtTime(run.started_at) : '-';
+    const endTime = run.completed_at ? fmtTime(run.completed_at) : '-';
+    const dur = run.started_at && run.completed_at ? fmtDur(new Date(run.completed_at) - new Date(run.started_at)) : '-';
+    const isOpen = !!openRuns[ri];
+
+    let h = '<div class="run-card">';
+    h += '<div class="run-header" onclick="toggleRun(' + ri + ')">';
+    h += '<div class="left"><span class="arrow' + (isOpen ? ' open' : '') + '" id="arrow-' + ri + '">&#9654;</span>';
+    h += '<span class="loop-num">Loop #' + run.loop + '</span>';
+    h += '<span class="run-time">' + startTime + '</span></div>';
+    h += '<span class="badge ' + badgeCls + '">' + esc(run.status) + '</span></div>';
+    h += '<div class="run-body' + (isOpen ? ' open' : '') + '" id="run-' + ri + '">';
+    h += '<div class="run-stats">';
+    h += '<div class="stat">Ctrls: <strong style="margin-left:4px">' + ctrls.length + '</strong></div>';
+    h += '<div class="stat">Errors: <strong style="margin-left:4px;color:' + (errCount > 0 ? '#f85149' : '#3fb950') + '">' + errCount + '</strong></div>';
+    h += '<div class="stat">Duration: <strong style="margin-left:4px">' + dur + '</strong></div>';
+    h += '<div class="stat">End: <strong style="margin-left:4px">' + endTime + '</strong></div></div>';
+    h += '<table class="ctrl-table"><tr><th>#</th><th>Type</th><th>Action</th><th>Description</th><th>Time</th><th>Exec</th><th>Result</th></tr>';
+    ctrls.forEach((c, ci) => {
+        const rc = c.result === 'error' ? ' class="error-row"' : '';
+        const tc = 'type-' + (c.type || 'touch');
+        const resCls = c.result === 'error' ? 'result-err' : 'result-ok';
+        const resIcon = c.result === 'error' ? '&#10007;' : '&#10003;';
+        const ct = c.timestamp ? fmtTime(c.timestamp) : '-';
+        const dKey = ri + '-' + ci;
+        const detailOpen = !!openDetails[dKey];
+        h += '<tr' + rc + ' data-desc="' + esc(c.description || '').toLowerCase() + '" data-type="' + esc(c.type || '') + '">';
+        h += '<td>' + c.frame_id + '</td>';
+        h += '<td><span class="type-badge ' + tc + '">' + esc(c.type || '-') + '</span></td>';
+        h += '<td>' + esc(c.action || '-') + '</td>';
+        h += '<td class="desc-col">' + esc(c.description || '-') + ' <span class="detail-toggle" onclick="toggleDetail(\'' + dKey + '\',event)">[detail]</span></td>';
+        h += '<td class="ts-col">' + ct + '</td>';
+        h += '<td class="ts-col">' + (c.exec_ms != null ? c.exec_ms + 'ms' : '-') + '</td>';
+        h += '<td class="' + resCls + '">' + resIcon + (c.error ? ' ' + esc(c.error) : '') + '</td></tr>';
+        h += '<tr class="detail-row' + (detailOpen ? ' open' : '') + '" id="detail-' + dKey + '"><td colspan="7"><div class="detail-json">' + esc(JSON.stringify(c.details || {}, null, 2)) + '</div></td></tr>';
+    });
+    h += '</table></div></div>';
+    return h;
+}
+
+function toggleRun(ri) {
+    openRuns[ri] = !openRuns[ri];
+    const body = document.getElementById('run-' + ri);
+    const arrow = document.getElementById('arrow-' + ri);
+    if (body) body.classList.toggle('open');
+    if (arrow) arrow.classList.toggle('open');
+}
+
+function toggleDetail(key, event) {
+    event.stopPropagation();
+    openDetails[key] = !openDetails[key];
+    const el = document.getElementById('detail-' + key);
+    if (el) el.classList.toggle('open');
+}
+
+function filterCtrls() {
+    const q = (document.getElementById('searchInput').value || '').toLowerCase().trim();
+    document.querySelectorAll('.ctrl-table tr[data-desc]').forEach(tr => {
+        if (!q) { tr.style.display = ''; return; }
+        const d = tr.getAttribute('data-desc') || '';
+        const t = tr.getAttribute('data-type') || '';
+        tr.style.display = (d.includes(q) || t.includes(q)) ? '' : 'none';
+    });
+}
+
+function fmtTime(iso) {
+    try { const d = new Date(iso); return d.toLocaleTimeString('en-GB', {hour:'2-digit',minute:'2-digit',second:'2-digit',fractionalSecondDigits:3}); }
+    catch(e) { return iso; }
+}
+function fmtDur(ms) {
+    if (ms < 1000) return ms + 'ms';
+    const s = Math.floor(ms / 1000);
+    if (s < 60) return s + 's';
+    return Math.floor(s / 60) + 'm ' + (s % 60) + 's';
+}
+function esc(s) { return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
+
+// Initial load + auto-refresh
+fetchLog();
+setInterval(() => { if (document.getElementById('autoRefresh').checked) fetchLog(); }, 2000);
+</script>
+</body>
+</html>"""
+
+
 class DebugHandler(BaseHTTPRequestHandler):
     engine_state: Any = None
     on_action: Any = None
+    playback_logger: Any = None  # PlaybackLogger instance (set by DebugServer)
 
     def log_message(self, format: str, *args: Any) -> None:
         pass  # Suppress default HTTP logging
@@ -243,8 +488,12 @@ class DebugHandler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:
         if self.path == "/" or self.path == "/index.html":
             self._respond_html(DASHBOARD_HTML)
+        elif self.path == "/logs":
+            self._serve_log_viewer()
         elif self.path == "/api/state":
             self._respond_json(self.engine_state.to_dict() if self.engine_state else {})
+        elif self.path == "/api/playback-log":
+            self._serve_playback_log()
         elif self.path.startswith("/api/screenshot"):
             self._serve_screenshot()
         else:
@@ -269,6 +518,17 @@ class DebugHandler(BaseHTTPRequestHandler):
             self._respond_json({"ok": True, "action": action})
         else:
             self._respond(404, b"Not Found")
+
+    def _serve_log_viewer(self) -> None:
+        """Serve the live playback log viewer page."""
+        self._respond_html(LOG_VIEWER_HTML)
+
+    def _serve_playback_log(self) -> None:
+        """Return the current playback log JSON."""
+        if self.playback_logger:
+            self._respond_json(self.playback_logger.get_data())
+        else:
+            self._respond_json({"recording": None, "runs": []})
 
     def _serve_screenshot(self) -> None:
         # Parse path from query param
@@ -318,16 +578,19 @@ class DebugHandler(BaseHTTPRequestHandler):
 
 
 class DebugServer:
-    def __init__(self, state: Any, port: int = 8080, on_action: Any = None):
+    def __init__(self, state: Any, port: int = 8080, on_action: Any = None,
+                 playback_logger: Any = None):
         self.state = state
         self.port = port
         self.on_action = on_action
+        self.playback_logger = playback_logger
         self._server: Optional[HTTPServer] = None
         self._thread: Optional[threading.Thread] = None
 
     def start(self) -> None:
         DebugHandler.engine_state = self.state
         DebugHandler.on_action = self.on_action
+        DebugHandler.playback_logger = self.playback_logger
         self._server = HTTPServer(("0.0.0.0", self.port), DebugHandler)
         self._thread = threading.Thread(target=self._server.serve_forever, daemon=True)
         self._thread.start()
