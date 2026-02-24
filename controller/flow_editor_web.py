@@ -36,6 +36,7 @@ import sys
 import threading
 import time
 import argparse
+from datetime import datetime
 import xml.etree.ElementTree as _ET
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from pathlib import Path
@@ -929,6 +930,16 @@ input:focus, select:focus, textarea:focus { outline: none; border-color: var(--b
           <button class="btn btn-sm" onclick="seqLoad()" title="Load sequence from .seq.json">Load .seq.json</button>
         </div>
         <div id="seqStatus" style="font-size:11px;color:var(--text2);margin-top:6px"></div>
+      </div>
+
+      <!-- Station Data Viewer -->
+      <div class="sidebar-section" data-hover-scope="station-data">
+        <h3>Station Data</h3>
+        <div id="extractLogSummary" style="font-size:11px;color:var(--text2);margin-bottom:6px">No extract logs yet</div>
+        <div class="btn-group" style="gap:4px">
+          <button class="btn btn-sm btn-primary" onclick="window.open('/station-data','_blank')" title="Open station data viewer in new tab">Open Data Viewer</button>
+          <button class="btn btn-sm" onclick="refreshExtractLogs()" title="Refresh extract log count">Refresh</button>
+        </div>
       </div>
     </div>
 
@@ -2081,6 +2092,28 @@ async function seqLoad() {
 setTimeout(() => seqRenderList(), 100);
 
 // ============================================================
+// EXTRACT LOG / STATION DATA
+// ============================================================
+async function refreshExtractLogs() {
+  try {
+    const data = await api('GET', '/extract-logs');
+    const logs = data.logs || [];
+    const el = document.getElementById('extractLogSummary');
+    if (!logs.length) {
+      el.textContent = 'No extract logs yet';
+    } else {
+      const totalEntries = logs.reduce((s, l) => s + l.entries, 0);
+      el.innerHTML = '<strong>' + logs.length + '</strong> log files, <strong>' + totalEntries + '</strong> total entries';
+    }
+  } catch (e) {
+    // ignore
+  }
+}
+// Auto-refresh extract log summary periodically
+setTimeout(() => refreshExtractLogs(), 2000);
+setInterval(() => refreshExtractLogs(), 30000);
+
+// ============================================================
 // DRAG & DROP
 // ============================================================
 function onDragStart(e, idx) { dragSrcIdx = idx; e.currentTarget.classList.add('dragging'); e.dataTransfer.effectAllowed = 'move'; }
@@ -2289,7 +2322,10 @@ async function startRecord() {
                   notify: true, notify_method: 'stdout', notify_url: '' },
       frames: [],
     };
-    filePath = '/work/' + pkg.split('.').pop() + '-' + Date.now() + '.urf.json';
+    // Generate unique filename with sequential numbering (station-001, station-002, ...)
+    const baseName = pkg.split('.').pop();
+    const ts = new Date().toISOString().replace(/[:.]/g,'-').slice(0,19);
+    filePath = '/work/' + baseName + '-' + ts + '.urf.json';
     document.getElementById('fileName').textContent = filePath.split('/').pop();
     refreshAll();
     loadFileList();
@@ -2916,23 +2952,55 @@ async function captureCtrlFrame() {
 
   // Show visual feedback
   showCtrlCaptureFeedback();
-  toast('Ctrl Capture #' + captureId + ' at ' + formatElapsed(t), 'success');
+  toast('Ctrl Capture #' + captureId + ' - fetching screen data...', 'success');
 
-  // Also fetch current screen elements for logging
+  // Fetch current screen elements AND save to JSON log immediately
   ctrlCaptureInFlight = true;
   try {
     const elData = await api('GET', '/elements');
     if (elData && elData.elements) {
-      const textElements = elData.elements
+      // Build extract_fields with full element data (text + coords)
+      const fields = elData.elements
         .filter(el => el.text && el.text.trim())
-        .map(el => el.text.trim());
+        .map(el => ({
+          name: el.resource_id ? el.resource_id.split('/').pop() : el.text.trim().substring(0, 30),
+          resource_id: el.resource_id || '',
+          text: el.text.trim(),
+          class: el.cls || '',
+          bounds: el.bounds || [],
+          center: el.center || [],
+          clickable: el.clickable || false,
+        }));
+
+      // Store fields in the extract frame
+      f.extract_fields = fields;
+
+      const textElements = fields.map(el => el.text);
       if (textElements.length) {
-        f.note += ' | texts: ' + textElements.slice(0, 10).join(', ');
-        renderTimeline();
+        f.note = 'Ctrl capture at ' + formatElapsed(t) + ' | ' + fields.length + ' elements | texts: ' + textElements.slice(0, 8).join(', ');
+        if (textElements.length > 8) f.note += ' ...+' + (textElements.length - 8) + ' more';
       }
+      renderTimeline();
+
+      // Save to JSON log file immediately (append)
+      try {
+        const saveRes = await api('POST', '/extract-save', {
+          recording_path: filePath || '/work/unnamed',
+          label: f.extract_label,
+          timestamp: new Date().toISOString(),
+          elements: fields,
+        });
+        if (saveRes.ok) {
+          toast('Ctrl #' + captureId + ': ' + fields.length + ' elements saved to JSON (' + saveRes.entries + ' entries)', 'success');
+        }
+      } catch (saveErr) {
+        console.log('Extract save error (non-fatal):', saveErr);
+      }
+    } else {
+      toast('Ctrl Capture #' + captureId + ' - no elements found on screen', 'warn');
     }
   } catch (err) {
-    // Non-fatal: log capture still saved
+    toast('Ctrl Capture #' + captureId + ' - element fetch failed: ' + err.message, 'error');
   } finally {
     ctrlCaptureInFlight = false;
   }
@@ -3182,6 +3250,278 @@ setTimeout(captureScreen, 500);
 
 
 # ============================================================
+# Station Data Viewer - Standalone HTML page
+# ============================================================
+
+STATION_DATA_HTML = r"""<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Station Data Viewer</title>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:'Segoe UI',system-ui,sans-serif;background:#0f1117;color:#e1e4e8;line-height:1.5}
+.header{background:#161b22;padding:14px 24px;border-bottom:1px solid #30363d;display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px}
+.header h1{font-size:18px;font-weight:600;color:#58a6ff}
+.header .back-link{color:#8b949e;text-decoration:none;font-size:13px}
+.header .back-link:hover{color:#58a6ff}
+.controls{padding:12px 24px;background:#161b22;border-bottom:1px solid #21262d;display:flex;gap:12px;align-items:center;flex-wrap:wrap}
+.controls button{background:#21262d;border:1px solid #30363d;color:#c9d1d9;padding:6px 14px;border-radius:6px;cursor:pointer;font-size:13px}
+.controls button:hover{background:#30363d}
+.controls button.active{background:#1f6feb;border-color:#1f6feb;color:#fff}
+.controls .auto-refresh{display:flex;align-items:center;gap:6px;font-size:12px;color:#8b949e}
+.controls .auto-refresh input{accent-color:#1f6feb}
+.container{max-width:1600px;margin:0 auto;padding:20px}
+.log-grid{display:grid;grid-template-columns:280px 1fr;gap:16px;min-height:calc(100vh - 140px)}
+.log-list{background:#161b22;border:1px solid #30363d;border-radius:8px;overflow:hidden}
+.log-list h3{padding:12px 16px;font-size:13px;color:#8b949e;border-bottom:1px solid #21262d;text-transform:uppercase;letter-spacing:.5px}
+.log-item{padding:10px 16px;border-bottom:1px solid #21262d;cursor:pointer;transition:background .15s}
+.log-item:hover{background:#1c2129}
+.log-item.active{background:#1f6feb22;border-left:3px solid #1f6feb}
+.log-item .name{font-weight:600;font-size:14px;color:#c9d1d9}
+.log-item .info{font-size:11px;color:#8b949e;margin-top:2px}
+.log-viewer{background:#161b22;border:1px solid #30363d;border-radius:8px;overflow:hidden}
+.log-viewer-header{padding:12px 16px;border-bottom:1px solid #21262d;display:flex;justify-content:space-between;align-items:center}
+.log-viewer-header h3{font-size:14px;color:#c9d1d9}
+.log-viewer-header .entry-count{font-size:12px;color:#8b949e}
+.entries{overflow-y:auto;max-height:calc(100vh - 240px);padding:8px}
+.entry-card{background:#0d1117;border:1px solid #21262d;border-radius:6px;margin-bottom:8px;overflow:hidden}
+.entry-header{padding:8px 12px;display:flex;justify-content:space-between;align-items:center;cursor:pointer;transition:background .15s}
+.entry-header:hover{background:#161b22}
+.entry-header .entry-time{font-size:12px;color:#58a6ff;font-family:'Consolas',monospace}
+.entry-header .entry-label{font-size:12px;color:#8b949e}
+.entry-header .entry-count{font-size:11px;background:#21262d;color:#8b949e;padding:1px 8px;border-radius:10px}
+.entry-body{display:none;padding:0 12px 12px}
+.entry-body.open{display:block}
+.element-table{width:100%;border-collapse:collapse;font-size:12px}
+.element-table th{text-align:left;padding:4px 8px;background:#161b22;color:#8b949e;font-weight:600;font-size:10px;text-transform:uppercase;letter-spacing:.5px;position:sticky;top:0}
+.element-table td{padding:4px 8px;border-bottom:1px solid #21262d;vertical-align:top}
+.element-table tr:hover{background:#1c2129}
+.text-cell{color:#3fb950;max-width:300px;word-break:break-word}
+.id-cell{color:#8b949e;font-family:'Consolas',monospace;font-size:11px;max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.bounds-cell{color:#d2a8ff;font-family:'Consolas',monospace;font-size:11px;white-space:nowrap}
+.empty{text-align:center;padding:40px;color:#8b949e}
+.summary-bar{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:8px;margin-bottom:16px}
+.summary-card{background:#161b22;border:1px solid #30363d;border-radius:6px;padding:10px 14px}
+.summary-card .label{font-size:10px;color:#8b949e;text-transform:uppercase;letter-spacing:.5px}
+.summary-card .value{font-size:20px;font-weight:700;color:#c9d1d9;margin-top:2px}
+.json-raw{font-family:'Consolas',monospace;font-size:11px;color:#c9d1d9;white-space:pre-wrap;word-break:break-all;background:#0d1117;padding:8px;border-radius:4px;max-height:300px;overflow-y:auto;border:1px solid #21262d}
+.view-toggle{display:flex;gap:4px}
+.view-toggle button{background:#0d1117;border:1px solid #30363d;color:#8b949e;padding:4px 10px;border-radius:4px;font-size:11px;cursor:pointer}
+.view-toggle button.active{background:#1f6feb;border-color:#1f6feb;color:#fff}
+</style>
+</head>
+<body>
+
+<div class="header">
+  <h1>Station Data Viewer</h1>
+  <a class="back-link" href="/">&larr; Back to Editor</a>
+</div>
+
+<div class="controls">
+  <button onclick="loadLogs()" title="Refresh log list">Refresh</button>
+  <div class="view-toggle">
+    <button class="active" id="viewTable" onclick="setViewMode('table')">Table</button>
+    <button id="viewJson" onclick="setViewMode('json')">Raw JSON</button>
+  </div>
+  <div class="auto-refresh">
+    <input type="checkbox" id="autoRefresh" checked>
+    <label for="autoRefresh">Auto-refresh (10s)</label>
+  </div>
+</div>
+
+<div class="container">
+  <div class="summary-bar" id="summaryBar"></div>
+  <div class="log-grid">
+    <div class="log-list">
+      <h3>Extract Logs</h3>
+      <div id="logList"><div class="empty">Loading...</div></div>
+    </div>
+    <div class="log-viewer">
+      <div class="log-viewer-header">
+        <h3 id="viewerTitle">Select a log file</h3>
+        <span class="entry-count" id="viewerCount"></span>
+      </div>
+      <div class="entries" id="viewerEntries">
+        <div class="empty">Select a log file from the left panel to view its data</div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script>
+let logs = [];
+let currentLogPath = '';
+let currentEntries = [];
+let viewMode = 'table';
+let autoRefreshTimer = null;
+
+async function apiGet(path) {
+  const res = await fetch('/api' + path);
+  return res.json();
+}
+
+async function loadLogs() {
+  try {
+    const data = await apiGet('/extract-logs');
+    logs = data.logs || [];
+    renderLogList();
+    renderSummary();
+    // Auto-reload current log if selected
+    if (currentLogPath) {
+      const still = logs.find(l => l.path === currentLogPath);
+      if (still) loadLogData(currentLogPath);
+    }
+  } catch (e) {
+    document.getElementById('logList').innerHTML = '<div class="empty">Error loading logs</div>';
+  }
+}
+
+function renderLogList() {
+  const el = document.getElementById('logList');
+  if (!logs.length) {
+    el.innerHTML = '<div class="empty">No extract logs found.<br><br>Press Ctrl during recording to capture station data,<br>or run a sequence with extract frames.</div>';
+    return;
+  }
+  el.innerHTML = logs.map(l =>
+    '<div class="log-item' + (l.path === currentLogPath ? ' active' : '') + '" onclick="loadLogData(\'' + esc(l.path) + '\')">' +
+    '<div class="name">' + esc(l.stem) + '</div>' +
+    '<div class="info">' + l.entries + ' entries | ' + l.size_kb + ' KB</div>' +
+    '</div>'
+  ).join('');
+}
+
+function renderSummary() {
+  const totalLogs = logs.length;
+  const totalEntries = logs.reduce((s, l) => s + l.entries, 0);
+  const totalSize = logs.reduce((s, l) => s + l.size_kb, 0).toFixed(1);
+  const el = document.getElementById('summaryBar');
+  el.innerHTML = [
+    '<div class="summary-card"><div class="label">Station Logs</div><div class="value">' + totalLogs + '</div></div>',
+    '<div class="summary-card"><div class="label">Total Entries</div><div class="value">' + totalEntries + '</div></div>',
+    '<div class="summary-card"><div class="label">Total Size</div><div class="value">' + totalSize + ' KB</div></div>',
+  ].join('');
+}
+
+async function loadLogData(path) {
+  currentLogPath = path;
+  renderLogList();
+  document.getElementById('viewerTitle').textContent = path.split('/').pop();
+
+  try {
+    const data = await apiGet('/extract-data?path=' + encodeURIComponent(path));
+    if (data.error) {
+      document.getElementById('viewerEntries').innerHTML = '<div class="empty">' + esc(data.error) + '</div>';
+      return;
+    }
+    currentEntries = data.entries || [];
+    document.getElementById('viewerCount').textContent = currentEntries.length + ' entries';
+    renderEntries();
+  } catch (e) {
+    document.getElementById('viewerEntries').innerHTML = '<div class="empty">Error loading data</div>';
+  }
+}
+
+function renderEntries() {
+  const el = document.getElementById('viewerEntries');
+  if (!currentEntries.length) {
+    el.innerHTML = '<div class="empty">No entries in this log</div>';
+    return;
+  }
+
+  if (viewMode === 'json') {
+    el.innerHTML = '<div class="json-raw">' + esc(JSON.stringify(currentEntries, null, 2)) + '</div>';
+    return;
+  }
+
+  el.innerHTML = currentEntries.map((entry, i) => {
+    const elements = entry.elements || entry.all_text || [];
+    const fields = entry.fields ? Object.entries(entry.fields) : [];
+    const ts = entry.timestamp ? formatTime(entry.timestamp) : '';
+    const label = entry.label || '';
+    const count = elements.length || fields.length;
+
+    let tableHtml = '';
+    if (elements.length) {
+      tableHtml = '<table class="element-table">' +
+        '<tr><th>#</th><th>Text</th><th>Resource ID</th><th>Bounds</th><th>Center</th></tr>' +
+        elements.map((el, j) => {
+          const text = el.text || '';
+          const rid = el.resource_id || '';
+          const bounds = el.bounds ? '[' + el.bounds.join(',') + ']' : '';
+          const center = el.center ? '(' + el.center.join(',') + ')' : '';
+          return '<tr><td>' + (j+1) + '</td>' +
+            '<td class="text-cell">' + esc(text) + '</td>' +
+            '<td class="id-cell" title="' + esc(rid) + '">' + esc(rid) + '</td>' +
+            '<td class="bounds-cell">' + bounds + '</td>' +
+            '<td class="bounds-cell">' + center + '</td></tr>';
+        }).join('') +
+        '</table>';
+    } else if (fields.length) {
+      tableHtml = '<table class="element-table">' +
+        '<tr><th>Field</th><th>Value</th><th>Details</th></tr>' +
+        fields.map(([name, val]) => {
+          const text = typeof val === 'object' ? (val.text || JSON.stringify(val)) : String(val);
+          const detail = typeof val === 'object' ? JSON.stringify(val, null, 1) : '';
+          return '<tr><td>' + esc(name) + '</td><td class="text-cell">' + esc(text) + '</td><td class="id-cell">' + esc(detail) + '</td></tr>';
+        }).join('') +
+        '</table>';
+    }
+
+    return '<div class="entry-card">' +
+      '<div class="entry-header" onclick="toggleEntry(' + i + ')">' +
+      '<span class="entry-time">' + esc(ts) + '</span>' +
+      '<span class="entry-label">' + esc(label) + '</span>' +
+      '<span class="entry-count">' + count + ' items</span>' +
+      '</div>' +
+      '<div class="entry-body" id="entry-' + i + '">' + tableHtml + '</div>' +
+      '</div>';
+  }).join('');
+}
+
+function toggleEntry(i) {
+  const el = document.getElementById('entry-' + i);
+  el.classList.toggle('open');
+}
+
+function setViewMode(mode) {
+  viewMode = mode;
+  document.getElementById('viewTable').classList.toggle('active', mode === 'table');
+  document.getElementById('viewJson').classList.toggle('active', mode === 'json');
+  renderEntries();
+}
+
+function formatTime(iso) {
+  try {
+    const d = new Date(iso);
+    return d.toLocaleString('en-GB', {year:'numeric',month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit',second:'2-digit'});
+  } catch(e) { return iso; }
+}
+
+function esc(s) { return String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;'); }
+
+// Auto-refresh
+function startAutoRefresh() {
+  stopAutoRefresh();
+  if (document.getElementById('autoRefresh').checked) {
+    autoRefreshTimer = setInterval(loadLogs, 10000);
+  }
+}
+function stopAutoRefresh() {
+  if (autoRefreshTimer) { clearInterval(autoRefreshTimer); autoRefreshTimer = null; }
+}
+document.getElementById('autoRefresh').addEventListener('change', startAutoRefresh);
+
+// Init
+loadLogs();
+startAutoRefresh();
+</script>
+</body>
+</html>"""
+
+
+# ============================================================
 # HTTP Server
 # ============================================================
 
@@ -3216,6 +3556,13 @@ class EditorHandler(BaseHTTPRequestHandler):
         elif path == "/api/sequence/load":
             name = params.get("name", [""])[0]
             self._json(self._seq_load(name))
+        elif path == "/api/extract-logs":
+            self._json(self._list_extract_logs())
+        elif path == "/api/extract-data":
+            fp = params.get("path", [""])[0]
+            self._json(self._read_extract_log(fp))
+        elif path == "/station-data":
+            self._html(STATION_DATA_HTML)
         else:
             self._error(404, "Not Found")
 
@@ -3256,6 +3603,8 @@ class EditorHandler(BaseHTTPRequestHandler):
             self._json(self._seq_save(body))
         elif path == "/api/delete":
             self._json(self._delete_file(body))
+        elif path == "/api/extract-save":
+            self._json(self._save_extract_data(body))
         else:
             self._error(404, "Not Found")
 
@@ -3785,6 +4134,104 @@ class EditorHandler(BaseHTTPRequestHandler):
         frame_part = f" frame={frame_id}" if frame_id is not None else ""
         print(f"{icon} [{scope}{frame_part}] {msg}", flush=True)
         return {"ok": True}
+
+    # -------- Extract Data / Station Data endpoints --------
+
+    def _save_extract_data(self, body: dict) -> dict:
+        """Save captured UI data to a JSONL extract log file (append).
+
+        Called during Ctrl capture in web recording to persist the captured
+        screen data immediately as a separate JSON log.
+        """
+        recording_path = body.get("recording_path", "")
+        label = body.get("label", "ctrl_capture")
+        elements = body.get("elements", [])
+        timestamp = body.get("timestamp", "")
+
+        if not recording_path:
+            recording_path = "/work/unnamed"
+
+        # Determine log file path: {work}/logs/{recording-stem}-extract.jsonl
+        rec_path = Path(recording_path)
+        stem = rec_path.stem.replace(".urf", "")
+        log_dir = Path(self.work_dir) / "logs"
+        log_dir.mkdir(parents=True, exist_ok=True)
+        log_file = log_dir / f"{stem}-extract.jsonl"
+
+        entry = {
+            "timestamp": timestamp or datetime.now().isoformat(timespec="milliseconds"),
+            "label": label,
+            "recording": recording_path,
+            "element_count": len(elements),
+            "elements": elements,
+        }
+
+        try:
+            with open(log_file, "a", encoding="utf-8") as f:
+                f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+            return {"ok": True, "path": str(log_file), "entries": self._count_lines(log_file)}
+        except Exception as e:
+            return {"ok": False, "error": str(e)}
+
+    def _list_extract_logs(self) -> dict:
+        """List all extract JSONL log files in the work/logs directory."""
+        log_dir = Path(self.work_dir) / "logs"
+        logs = []
+        if log_dir.exists():
+            for p in sorted(log_dir.glob("*-extract.jsonl")):
+                line_count = self._count_lines(p)
+                logs.append({
+                    "path": str(p),
+                    "name": p.name,
+                    "stem": p.stem.replace("-extract", ""),
+                    "entries": line_count,
+                    "size_kb": round(p.stat().st_size / 1024, 1),
+                })
+            # Also include playback extract logs
+            for p in sorted(log_dir.glob("extract-*.jsonl")):
+                line_count = self._count_lines(p)
+                logs.append({
+                    "path": str(p),
+                    "name": p.name,
+                    "stem": p.stem.replace("extract-", ""),
+                    "entries": line_count,
+                    "size_kb": round(p.stat().st_size / 1024, 1),
+                })
+        return {"logs": logs}
+
+    def _read_extract_log(self, path: str) -> dict:
+        """Read a JSONL extract log file and return all entries."""
+        if not path:
+            return {"error": "No path specified"}
+        p = Path(path)
+        if not p.exists():
+            return {"error": f"File not found: {path}"}
+        # Safety check
+        try:
+            p.resolve().relative_to(Path(self.work_dir).resolve())
+        except ValueError:
+            return {"error": "Cannot read files outside work directory"}
+        try:
+            entries = []
+            with open(p, "r", encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if line:
+                        try:
+                            entries.append(json.loads(line))
+                        except json.JSONDecodeError:
+                            pass
+            return {"path": str(p), "name": p.name, "entries": entries}
+        except Exception as e:
+            return {"error": str(e)}
+
+    @staticmethod
+    def _count_lines(path: Path) -> int:
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                return sum(1 for line in f if line.strip())
+        except Exception:
+            return 0
 
     # -------- Sequence Runner endpoints --------
 

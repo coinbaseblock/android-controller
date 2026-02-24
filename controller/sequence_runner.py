@@ -160,6 +160,7 @@ class SequenceRunner:
 
                         player = UniversalPlayer(
                             recording=recording,
+                            recording_path=script_path,
                             replay_mode=self.replay_mode,
                             speed=self.speed,
                             loop=False,  # individual scripts don't loop
