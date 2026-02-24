@@ -675,9 +675,16 @@ class UniversalPlayer:
                 result["screenshot"] = None
 
         # Write to extraction log (JSONL format - one JSON per line, append-friendly)
+        # Use ONE log file per recording (per station), not per extract label.
+        # e.g. station-01.urf.json -> station-01-extract.jsonl
+        # All Ctrl captures within that station append to the same file.
         log_dir = Path(self.recording.settings.screenshot_dir).parent / "logs"
         log_dir.mkdir(parents=True, exist_ok=True)
-        log_file = log_dir / f"extract-{label}.jsonl"
+        if self.recording_path:
+            stem = Path(self.recording_path).stem.replace(".urf", "")
+            log_file = log_dir / f"{stem}-extract.jsonl"
+        else:
+            log_file = log_dir / f"extract-{label}.jsonl"
         with open(log_file, "a", encoding="utf-8") as f:
             f.write(json.dumps(result, ensure_ascii=False) + "\n")
 
