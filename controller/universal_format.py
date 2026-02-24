@@ -147,6 +147,15 @@ from typing import Any, Dict, List, Optional
 KEY_NAMES = {
     3: "HOME", 4: "BACK", 24: "VOLUME_UP", 25: "VOLUME_DOWN",
     26: "POWER", 82: "MENU", 187: "APP_SWITCH",
+    # Modifier / extra keys
+    113: "CTRL_LEFT", 114: "CTRL_RIGHT",
+    57: "ALT_LEFT", 58: "ALT_RIGHT",
+    59: "SHIFT_LEFT", 60: "SHIFT_RIGHT",
+    66: "ENTER", 67: "DEL", 61: "TAB", 111: "ESCAPE",
+    122: "MOVE_HOME", 123: "MOVE_END",
+    92: "PAGE_UP", 93: "PAGE_DOWN",
+    19: "DPAD_UP", 20: "DPAD_DOWN", 21: "DPAD_LEFT", 22: "DPAD_RIGHT",
+    23: "DPAD_CENTER",
 }
 
 

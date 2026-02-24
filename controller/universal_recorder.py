@@ -66,6 +66,17 @@ KEY_CODE_MAP = {
     "KEY_VOLUMEDOWN": 25,    # KEYCODE_VOLUME_DOWN
     "KEY_CAMERA": 27,        # KEYCODE_CAMERA
     "KEY_SEARCH": 84,        # KEYCODE_SEARCH
+    # Modifier keys - captured for logging/markers
+    "KEY_LEFTCTRL": 113,     # KEYCODE_CTRL_LEFT
+    "KEY_RIGHTCTRL": 114,    # KEYCODE_CTRL_RIGHT
+    "KEY_LEFTALT": 57,       # KEYCODE_ALT_LEFT
+    "KEY_RIGHTALT": 58,      # KEYCODE_ALT_RIGHT
+    "KEY_LEFTSHIFT": 59,     # KEYCODE_SHIFT_LEFT
+    "KEY_RIGHTSHIFT": 60,    # KEYCODE_SHIFT_RIGHT
+    "KEY_ENTER": 66,         # KEYCODE_ENTER
+    "KEY_DELETE": 67,        # KEYCODE_DEL (backspace)
+    "KEY_TAB": 61,           # KEYCODE_TAB
+    "KEY_ESC": 111,          # KEYCODE_ESCAPE
 }
 
 
@@ -444,6 +455,43 @@ class UniversalRecorder:
             )
             self._add_frame(open_frame)
 
+    def _capture_ctrl_extract(self, event_t: int) -> None:
+        """When Ctrl is pressed during recording, capture an extract frame for logging.
+
+        This collects all visible UI text and records it as an 'extract' frame,
+        making it easy to capture screen state at specific moments.
+        """
+        try:
+            all_texts = set()
+            xml = get_ui_xml(self.serial)
+            elements = parse_all_elements(xml)
+            for el in elements:
+                if el.text and el.text.strip():
+                    all_texts.add(el.text.strip())
+
+            text_list = sorted(all_texts)
+            extract_id = self.recording.next_id()
+            frame = Frame(
+                id=extract_id,
+                t=event_t,
+                type="extract",
+                extract_label=f"ctrl_capture_{extract_id}",
+                extract_all_text=True,
+                extract_screenshot=True,
+                extract_fields=[],
+                note=f"Ctrl capture | {len(text_list)} text elements",
+            )
+            self._add_frame(frame)
+            ts_sec = event_t / 1000.0
+            print(f"\r  Ctrl Capture #{extract_id} at {ts_sec:.1f}s - {len(text_list)} texts found")
+            if text_list:
+                for txt in text_list[:10]:
+                    print(f"    > {txt[:80]}")
+                if len(text_list) > 10:
+                    print(f"    ... +{len(text_list)-10} more")
+        except Exception as e:
+            print(f"\r  Ctrl capture failed: {e}")
+
     # ---------- Raw Recording ----------
 
     def record_raw(self) -> None:
@@ -531,7 +579,7 @@ class UniversalRecorder:
                 pending_update = True
                 continue
 
-            # Handle key events (hardware buttons)
+            # Handle key events (hardware buttons + modifier keys)
             if ev_type == "EV_KEY" and code in KEY_CODE_MAP:
                 value = int(value_hex, 16)
                 if value == 1:  # Key down
@@ -549,6 +597,11 @@ class UniversalRecorder:
                     self._add_frame(frame)
                     unix_ts = int(time.time())
                     print(f"\r  Key: {key_name} ({keycode})  [ts:{unix_ts}]")
+
+                    # Ctrl key pressed: add extract frame to capture screen state for logging
+                    if code in ("KEY_LEFTCTRL", "KEY_RIGHTCTRL"):
+                        self._capture_ctrl_extract(event_t)
+
                     self._pending_key_code = None
                 continue
 
