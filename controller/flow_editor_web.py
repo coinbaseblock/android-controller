@@ -261,6 +261,146 @@ class ProcessManager:
 # Global process manager
 _proc_manager = ProcessManager()
 
+
+class SequenceProcessManager:
+    """Manages a background sequence runner subprocess."""
+
+    def __init__(self) -> None:
+        self._proc: Optional[subprocess.Popen] = None
+        self._status: str = "idle"
+        self._current_loop: int = 0
+        self._current_script_idx: int = 0
+        self._current_script_name: str = ""
+        self._total_scripts: int = 0
+        self._message: str = ""
+        self._lock = threading.Lock()
+        self._monitor_thread: Optional[threading.Thread] = None
+
+    @property
+    def status(self) -> str:
+        with self._lock:
+            if self._proc and self._proc.poll() is not None:
+                self._status = "idle"
+                self._proc = None
+            return self._status
+
+    def get_status_dict(self) -> dict:
+        with self._lock:
+            if self._proc and self._proc.poll() is not None:
+                self._status = "idle"
+                self._proc = None
+            return {
+                "status": self._status,
+                "current_loop": self._current_loop,
+                "current_script_idx": self._current_script_idx,
+                "current_script_name": self._current_script_name,
+                "total_scripts": self._total_scripts,
+                "message": self._message,
+            }
+
+    def start(self, seq_file: str, work_dir: str) -> dict:
+        with self._lock:
+            if self._proc and self._proc.poll() is None:
+                return {"ok": False, "error": "Sequence already running"}
+
+            script = str(Path(__file__).parent / "sequence_runner.py")
+            if not Path(script).exists():
+                return {"ok": False, "error": "sequence_runner.py not found"}
+
+            cmd = [sys.executable, "-u", script, "--sequence", seq_file]
+
+            try:
+                self._proc = subprocess.Popen(
+                    cmd,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.STDOUT,
+                    text=True,
+                    cwd=work_dir,
+                    preexec_fn=os.setsid,
+                )
+                self._status = "running"
+                self._current_loop = 0
+                self._current_script_idx = 0
+                self._current_script_name = ""
+                self._message = ""
+                self._start_monitor()
+                return {"ok": True}
+            except Exception as e:
+                self._status = "error"
+                self._message = str(e)
+                return {"ok": False, "error": str(e)}
+
+    def stop(self) -> dict:
+        with self._lock:
+            if not self._proc or self._proc.poll() is not None:
+                self._status = "idle"
+                self._proc = None
+                return {"ok": True}
+
+            try:
+                os.killpg(os.getpgid(self._proc.pid), signal.SIGINT)
+                try:
+                    self._proc.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    os.killpg(os.getpgid(self._proc.pid), signal.SIGKILL)
+                    self._proc.wait(timeout=3)
+            except (ProcessLookupError, OSError):
+                pass
+
+            self._status = "idle"
+            self._proc = None
+            return {"ok": True}
+
+    def _start_monitor(self) -> None:
+        if self._monitor_thread and self._monitor_thread.is_alive():
+            return
+        self._monitor_thread = threading.Thread(target=self._monitor_output, daemon=True)
+        self._monitor_thread.start()
+
+    def _monitor_output(self) -> None:
+        proc = self._proc
+        if not proc or not proc.stdout:
+            return
+
+        try:
+            for line in proc.stdout:
+                line = line.strip()
+                if not line:
+                    continue
+
+                with self._lock:
+                    # Parse sequence runner output
+                    if "Sequence Loop" in line:
+                        try:
+                            loop_num = int(line.split("Sequence Loop")[1].split("===")[0].strip())
+                            self._current_loop = loop_num
+                        except (ValueError, IndexError):
+                            pass
+                    if "Script [" in line:
+                        try:
+                            part = line.split("Script [")[1]
+                            idx_part = part.split("]")[0]
+                            cur, total = idx_part.split("/")
+                            self._current_script_idx = int(cur)
+                            self._total_scripts = int(total)
+                            name_part = part.split("]: ")[1] if "]: " in part else ""
+                            self._current_script_name = name_part.split(" ---")[0].strip()
+                        except (ValueError, IndexError):
+                            pass
+
+                    print(f"  [sequence] {line}", flush=True)
+
+        except Exception:
+            pass
+        finally:
+            with self._lock:
+                if self._proc == proc:
+                    self._status = "idle"
+                    self._proc = None
+
+
+_seq_manager = SequenceProcessManager()
+
 # UI dump cache for Ctrl+hover inspect (avoids repeated slow uiautomator dumps)
 _ui_dump_cache_lock = threading.Lock()
 _ui_dump_cache: dict = {"xml": "", "time": 0.0, "serial": ""}
@@ -350,6 +490,7 @@ input:focus, select:focus, textarea:focus { outline: none; border-color: var(--b
 .type-screenshot { background: var(--pink); }
 .type-wait { background: var(--text2); }
 .type-shell { background: var(--red); }
+.type-extract { background: #f0e68c; }
 .type-marker { background: #555; }
 .frame-body { flex: 1; padding: 8px 10px; min-width: 0; }
 .frame-header { display: flex; align-items: center; gap: 8px; }
@@ -364,6 +505,7 @@ input:focus, select:focus, textarea:focus { outline: none; border-color: var(--b
 .badge-screenshot { background: #f778ba33; color: var(--pink); }
 .badge-wait { background: #8b949e33; color: var(--text2); }
 .badge-shell { background: #f8514933; color: var(--red); }
+.badge-extract { background: #f0e68c33; color: #f0e68c; }
 .badge-marker { background: #55555533; color: #888; }
 .frame-desc { font-size: 13px; margin-top: 3px; color: var(--text); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .frame-note { font-size: 11px; color: var(--text2); font-style: italic; margin-top: 2px; }
@@ -718,6 +860,49 @@ input:focus, select:focus, textarea:focus { outline: none; border-color: var(--b
           <button class="btn btn-sm btn-danger" onclick="clearAll()" title="Delete all frames">Clear All</button>
         </div>
       </div>
+
+      <!-- Sequence Runner -->
+      <div class="sidebar-section" data-hover-scope="sequence">
+        <h3>Sequence Runner</h3>
+        <div id="seqList" style="max-height:200px;overflow-y:auto;margin-bottom:8px;font-size:12px"></div>
+        <div class="btn-group" style="flex-wrap:wrap;gap:4px">
+          <button class="btn btn-sm" onclick="seqAddCurrent()" title="Add current file to sequence">+ Add Current</button>
+          <button class="btn btn-sm" onclick="seqAddFromList()" title="Pick file to add">+ Pick File</button>
+          <button class="btn btn-sm" onclick="seqClear()" title="Clear sequence">Clear</button>
+        </div>
+        <div style="margin-top:8px">
+          <div class="field-row" style="gap:6px;margin-bottom:4px">
+            <div class="field"><label style="font-size:10px">Loop</label>
+              <select id="seqLoop" style="font-size:11px"><option value="false">No</option><option value="true">Yes</option></select>
+            </div>
+            <div class="field"><label style="font-size:10px">Count</label>
+              <input id="seqLoopCount" type="number" value="0" min="0" style="width:50px;font-size:11px" title="0 = infinite">
+            </div>
+          </div>
+          <div class="field-row" style="gap:6px;margin-bottom:4px">
+            <div class="field"><label style="font-size:10px">Script Delay</label>
+              <input id="seqScriptDelay" type="number" value="2" min="0" step="0.5" style="width:50px;font-size:11px" title="Seconds between scripts">
+            </div>
+            <div class="field"><label style="font-size:10px">Loop Delay</label>
+              <input id="seqLoopDelay" type="number" value="10" min="0" step="1" style="width:50px;font-size:11px" title="Seconds between loops">
+            </div>
+          </div>
+          <div class="field-row" style="gap:6px;margin-bottom:6px">
+            <div class="field"><label style="font-size:10px">On Error</label>
+              <select id="seqOnError" style="font-size:11px"><option value="skip">Skip</option><option value="stop">Stop</option></select>
+            </div>
+          </div>
+        </div>
+        <div class="btn-group" style="gap:6px">
+          <button class="btn btn-sm btn-primary" onclick="seqPlay()" title="Run sequence">&#9654; Run Sequence</button>
+          <button class="btn btn-sm" onclick="seqStop()" title="Stop sequence">&#9632; Stop</button>
+        </div>
+        <div class="btn-group" style="gap:4px;margin-top:4px">
+          <button class="btn btn-sm" onclick="seqSave()" title="Save sequence to .seq.json">Save .seq.json</button>
+          <button class="btn btn-sm" onclick="seqLoad()" title="Load sequence from .seq.json">Load .seq.json</button>
+        </div>
+        <div id="seqStatus" style="font-size:11px;color:var(--text2);margin-top:6px"></div>
+      </div>
     </div>
 
     <!-- MAIN CONTENT -->
@@ -873,6 +1058,7 @@ const FRAME_TYPES = [
   {type:'wait',     icon:'⏳', name:'Wait',       desc:'Pause for duration'},
   {type:'swipe',    icon:'↕️', name:'Swipe',      desc:'Swipe gesture'},
   {type:'shell',    icon:'💻', name:'Shell',      desc:'ADB shell command'},
+  {type:'extract',  icon:'📋', name:'Extract',    desc:'Capture UI data to log'},
   {type:'marker',   icon:'📌', name:'Marker',     desc:'Bookmark / Note'},
 ];
 
@@ -1013,6 +1199,7 @@ function describeFrame(f) {
     case 'screenshot': return `${f.stage || 'capture'}${f.send ? ' +send' : ''}`;
     case 'wait': return `${f.duration_ms}ms`;
     case 'shell': return f.command || '?';
+    case 'extract': return `${f.extract_label || 'data'}${f.extract_all_text ? ' +text' : ''}${f.extract_screenshot ? ' +img' : ''}`;
     case 'marker': return f.note || '(marker)';
     default: return f.action || f.type;
   }
@@ -1034,6 +1221,8 @@ function buildFrameHoverText(f) {
   if (f.command) parts.push(`command=${f.command}`);
   if (f.duration_ms) parts.push(`duration=${f.duration_ms}ms`);
   if (f.element) parts.push('element=' + JSON.stringify(f.element));
+  if (f.extract_label) parts.push(`extract_label=${f.extract_label}`);
+  if (f.extract_fields) parts.push(`extract_fields=${f.extract_fields.length}`);
   return parts.join(' | ');
 }
 
@@ -1233,7 +1422,7 @@ function renderDetail() {
     <div class="field-row">
       <div class="field"><label>Type</label>
         <select onchange="changeFrameType(${f.id},this.value)">
-          ${['touch','gesture','element','app','key','screenshot','wait','shell','marker'].map(t =>
+          ${['touch','gesture','element','app','key','screenshot','wait','shell','extract','marker'].map(t =>
             `<option value="${t}" ${t===f.type?'selected':''}>${t}</option>`
           ).join('')}
         </select>
@@ -1330,6 +1519,27 @@ function renderDetail() {
 
   if (f.type === 'shell') {
     html += `<div class="field"><label>Command</label><input value="${esc(f.command||'')}" onchange="updateFrameField(${f.id},'command',this.value)"></div>`;
+  }
+
+  if (f.type === 'extract') {
+    html += `
+      <div class="field"><label>Label</label><input value="${esc(f.extract_label||'')}" onchange="updateFrameField(${f.id},'extract_label',this.value)"></div>
+      <div class="field"><label>Extract Fields</label>
+        <textarea style="width:100%;font-family:monospace;font-size:12px;min-height:80px"
+          onchange="try{updateFrameField(${f.id},'extract_fields',JSON.parse(this.value))}catch(e){}">${JSON.stringify(f.extract_fields||[],null,2)}</textarea>
+      </div>
+      <div class="field"><label>Capture all text</label>
+        <select onchange="updateFrameField(${f.id},'extract_all_text',this.value==='true')">
+          <option value="true" ${f.extract_all_text?'selected':''}>Yes</option>
+          <option value="false" ${!f.extract_all_text?'selected':''}>No</option>
+        </select>
+      </div>
+      <div class="field"><label>Take screenshot</label>
+        <select onchange="updateFrameField(${f.id},'extract_screenshot',this.value==='true')">
+          <option value="true" ${f.extract_screenshot?'selected':''}>Yes</option>
+          <option value="false" ${!f.extract_screenshot?'selected':''}>No</option>
+        </select>
+      </div>`;
   }
 
   html += `<div class="field"><label>Note</label><input value="${esc(f.note||'')}" onchange="updateFrameField(${f.id},'note',this.value)"></div>`;
@@ -1473,6 +1683,18 @@ function renderAddForm(type) {
     html += `<div class="field"><label>Duration (ms)</label><input id="addDur" type="number" value="2000"></div>`;
   } else if (type === 'shell') {
     html += `<div class="field"><label>Command</label><input id="addCmd" placeholder="am broadcast ..."></div>`;
+  } else if (type === 'extract') {
+    html += `
+      <div class="field"><label>Label</label><input id="addExtLabel" placeholder="station_status" value="station_status"></div>
+      <div class="field"><label>Extract Fields (JSON)</label>
+        <textarea id="addExtFields" rows="4" style="width:100%;font-family:monospace;font-size:12px" placeholder='[{"name":"station_name","resource_id":"","text_match":""}]'>[{"name":"status","resource_id":"","text_match":""}]</textarea>
+      </div>
+      <div class="field"><label>Capture all text</label>
+        <select id="addExtAllText"><option value="true" selected>Yes</option><option value="false">No</option></select>
+      </div>
+      <div class="field"><label>Take screenshot</label>
+        <select id="addExtScreenshot"><option value="true" selected>Yes</option><option value="false">No</option></select>
+      </div>`;
   } else if (type === 'marker') {
     // just note
   }
@@ -1526,6 +1748,11 @@ function confirmAdd() {
     f.duration_ms = +(document.getElementById('addDur')?.value || 2000);
   } else if (type === 'shell') {
     f.command = document.getElementById('addCmd')?.value || '';
+  } else if (type === 'extract') {
+    f.extract_label = document.getElementById('addExtLabel')?.value || 'extract';
+    try { f.extract_fields = JSON.parse(document.getElementById('addExtFields')?.value || '[]'); } catch(e) { f.extract_fields = []; }
+    f.extract_all_text = document.getElementById('addExtAllText')?.value === 'true';
+    f.extract_screenshot = document.getElementById('addExtScreenshot')?.value === 'true';
   }
 
   if (addInsertPos >= 0) recording.frames.splice(addInsertPos, 0, f);
@@ -1578,6 +1805,159 @@ function clearAll() {
   selectedId = -1;
   refreshAll();
 }
+
+// ============================================================
+// SEQUENCE RUNNER
+// ============================================================
+let seqScripts = [];  // [{path, name, enabled}]
+let seqRunning = false;
+let seqPollTimer = null;
+
+function seqRenderList() {
+  const el = document.getElementById('seqList');
+  if (!seqScripts.length) {
+    el.innerHTML = '<div style="color:var(--text2);font-style:italic;padding:4px">No scripts in sequence</div>';
+    return;
+  }
+  el.innerHTML = seqScripts.map((s, i) => `
+    <div style="display:flex;align-items:center;gap:4px;padding:3px 4px;background:${s.enabled?'var(--bg3)':'var(--bg2)'};border-radius:4px;margin-bottom:2px;${!s.enabled?'opacity:.5':''}">
+      <input type="checkbox" ${s.enabled?'checked':''} onchange="seqToggle(${i},this.checked)" style="margin:0">
+      <span style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${s.path}">${i+1}. ${s.name}</span>
+      <button onclick="seqMoveUp(${i})" style="background:none;border:none;color:var(--text2);cursor:pointer;font-size:10px;padding:0 2px" title="Move up">&uarr;</button>
+      <button onclick="seqMoveDown(${i})" style="background:none;border:none;color:var(--text2);cursor:pointer;font-size:10px;padding:0 2px" title="Move down">&darr;</button>
+      <button onclick="seqRemove(${i})" style="background:none;border:none;color:var(--red);cursor:pointer;font-size:12px;padding:0 2px" title="Remove">&times;</button>
+    </div>
+  `).join('');
+}
+
+function seqAddCurrent() {
+  if (!currentPath) { toast('No file loaded', 'error'); return; }
+  const name = currentPath.split('/').pop();
+  seqScripts.push({path: currentPath, name, enabled: true});
+  seqRenderList();
+  toast('Added: ' + name);
+}
+
+function seqAddFromList() {
+  // Show a simple prompt-based picker from loaded file list
+  const fileList = document.getElementById('fileList');
+  if (!fileList) return;
+  const items = Array.from(fileList.querySelectorAll('.file-item'));
+  const paths = items.map(i => i.dataset?.path || i.textContent.trim()).filter(Boolean);
+  if (!paths.length) { toast('No files found', 'error'); return; }
+  const msg = paths.map((p, i) => `${i+1}. ${p.split('/').pop()}`).join('\n');
+  const choice = prompt('Pick file number to add:\n' + msg);
+  if (!choice) return;
+  const idx = parseInt(choice) - 1;
+  if (idx >= 0 && idx < paths.length) {
+    const p = paths[idx];
+    seqScripts.push({path: p, name: p.split('/').pop(), enabled: true});
+    seqRenderList();
+    toast('Added: ' + p.split('/').pop());
+  }
+}
+
+function seqToggle(i, checked) { seqScripts[i].enabled = checked; seqRenderList(); }
+function seqRemove(i) { seqScripts.splice(i, 1); seqRenderList(); }
+function seqMoveUp(i) { if (i <= 0) return; [seqScripts[i-1], seqScripts[i]] = [seqScripts[i], seqScripts[i-1]]; seqRenderList(); }
+function seqMoveDown(i) { if (i >= seqScripts.length-1) return; [seqScripts[i], seqScripts[i+1]] = [seqScripts[i+1], seqScripts[i]]; seqRenderList(); }
+function seqClear() { seqScripts = []; seqRenderList(); }
+
+async function seqPlay() {
+  const enabled = seqScripts.filter(s => s.enabled);
+  if (!enabled.length) { toast('No scripts in sequence', 'error'); return; }
+  const body = {
+    scripts: enabled.map(s => ({path: s.path, enabled: true})),
+    settings: {
+      loop: document.getElementById('seqLoop')?.value === 'true',
+      loop_count: +(document.getElementById('seqLoopCount')?.value || 0),
+      loop_delay: +(document.getElementById('seqLoopDelay')?.value || 10),
+      script_delay: +(document.getElementById('seqScriptDelay')?.value || 2),
+      speed: recording?.settings?.speed || 1.0,
+      on_script_error: document.getElementById('seqOnError')?.value || 'skip',
+      replay_mode: 'auto',
+    }
+  };
+  const res = await api('POST', '/sequence/play', body);
+  if (res.ok) {
+    seqRunning = true;
+    toast('Sequence started!', 'success');
+    seqPollStatus();
+  } else {
+    toast('Error: ' + (res.error || 'Unknown'), 'error');
+  }
+}
+
+async function seqStop() {
+  await api('POST', '/sequence/stop', {});
+  seqRunning = false;
+  if (seqPollTimer) { clearInterval(seqPollTimer); seqPollTimer = null; }
+  document.getElementById('seqStatus').textContent = 'Stopped';
+  toast('Sequence stopped');
+}
+
+function seqPollStatus() {
+  if (seqPollTimer) clearInterval(seqPollTimer);
+  seqPollTimer = setInterval(async () => {
+    const st = await api('GET', '/sequence/status');
+    const el = document.getElementById('seqStatus');
+    if (st.status === 'running') {
+      el.innerHTML = `<span style="color:var(--green)">Running</span> | Loop ${st.current_loop} | Script ${st.current_script_idx}/${st.total_scripts}: ${st.current_script_name || ''}`;
+    } else {
+      el.innerHTML = `<span style="color:var(--text2)">${st.status || 'idle'}</span>`;
+      if (st.status !== 'running') {
+        seqRunning = false;
+        clearInterval(seqPollTimer);
+        seqPollTimer = null;
+      }
+    }
+  }, 1500);
+}
+
+async function seqSave() {
+  if (!seqScripts.length) { toast('No scripts to save', 'error'); return; }
+  const name = prompt('Sequence name:', 'my_sequence');
+  if (!name) return;
+  const body = {
+    name: name,
+    scripts: seqScripts,
+    settings: {
+      loop: document.getElementById('seqLoop')?.value === 'true',
+      loop_count: +(document.getElementById('seqLoopCount')?.value || 0),
+      loop_delay: +(document.getElementById('seqLoopDelay')?.value || 10),
+      script_delay: +(document.getElementById('seqScriptDelay')?.value || 2),
+      speed: recording?.settings?.speed || 1.0,
+      on_script_error: document.getElementById('seqOnError')?.value || 'skip',
+      replay_mode: 'auto',
+    }
+  };
+  const res = await api('POST', '/sequence/save', body);
+  if (res.ok) {
+    toast('Saved: ' + (res.path || ''), 'success');
+    loadFileList();
+  } else {
+    toast('Error: ' + (res.error || 'Unknown'), 'error');
+  }
+}
+
+async function seqLoad() {
+  const name = prompt('Sequence filename (without .seq.json):');
+  if (!name) return;
+  const res = await api('GET', '/sequence/load?name=' + encodeURIComponent(name));
+  if (res.error) { toast('Error: ' + res.error, 'error'); return; }
+  seqScripts = (res.scripts || []).map(s => ({path: s.path, name: (s.path||'').split('/').pop(), enabled: s.enabled !== false}));
+  const st = res.settings || {};
+  if (st.loop !== undefined) document.getElementById('seqLoop').value = st.loop ? 'true' : 'false';
+  if (st.loop_count !== undefined) document.getElementById('seqLoopCount').value = st.loop_count;
+  if (st.loop_delay !== undefined) document.getElementById('seqLoopDelay').value = st.loop_delay;
+  if (st.script_delay !== undefined) document.getElementById('seqScriptDelay').value = st.script_delay;
+  if (st.on_script_error !== undefined) document.getElementById('seqOnError').value = st.on_script_error;
+  seqRenderList();
+  toast('Loaded sequence: ' + (res.name || name), 'success');
+}
+
+// Init sequence list on load
+setTimeout(() => seqRenderList(), 100);
 
 // ============================================================
 // DRAG & DROP
@@ -2597,6 +2977,11 @@ class EditorHandler(BaseHTTPRequestHandler):
             self._json(self._capture_elements(params))
         elif path == "/api/devices":
             self._json(self._check_devices())
+        elif path == "/api/sequence/status":
+            self._json(_seq_manager.get_status_dict())
+        elif path == "/api/sequence/load":
+            name = params.get("name", [""])[0]
+            self._json(self._seq_load(name))
         else:
             self._error(404, "Not Found")
 
@@ -2629,6 +3014,12 @@ class EditorHandler(BaseHTTPRequestHandler):
             self._json(self._device_shell(body))
         elif path == "/api/inspect":
             self._json(self._inspect_at_point(body))
+        elif path == "/api/sequence/play":
+            self._json(self._seq_play(body))
+        elif path == "/api/sequence/stop":
+            self._json(_seq_manager.stop())
+        elif path == "/api/sequence/save":
+            self._json(self._seq_save(body))
         else:
             self._error(404, "Not Found")
 
@@ -2653,7 +3044,12 @@ class EditorHandler(BaseHTTPRequestHandler):
                             files.append(str(p))
                     except Exception:
                         pass
-        return {"files": files}
+        # Also list sequence files
+        sequences = []
+        if work.exists():
+            for p in sorted(work.glob("*.seq.json")):
+                sequences.append(str(p))
+        return {"files": files, "sequences": sequences}
 
     def _load_file(self, path: str) -> dict:
         if not path:
@@ -3132,6 +3528,65 @@ class EditorHandler(BaseHTTPRequestHandler):
         frame_part = f" frame={frame_id}" if frame_id is not None else ""
         print(f"{icon} [{scope}{frame_part}] {msg}", flush=True)
         return {"ok": True}
+
+    # -------- Sequence Runner endpoints --------
+
+    def _seq_play(self, body: dict) -> dict:
+        """Start a sequence run. Saves a temp .seq.json and launches sequence_runner.py."""
+        scripts = body.get("scripts", [])
+        settings = body.get("settings", {})
+        if not scripts:
+            return {"ok": False, "error": "No scripts provided"}
+
+        # Save temp sequence file
+        seq_data = {"name": "temp_sequence", "scripts": scripts, "settings": settings}
+        seq_path = Path(self.work_dir) / ".tmp_sequence.seq.json"
+        seq_path.write_text(json.dumps(seq_data, indent=2, ensure_ascii=False), encoding="utf-8")
+
+        return _seq_manager.start(str(seq_path), self.work_dir)
+
+    def _seq_stop(self) -> dict:
+        return _seq_manager.stop()
+
+    def _seq_save(self, body: dict) -> dict:
+        """Save a sequence definition to a .seq.json file."""
+        name = body.get("name", "sequence")
+        scripts = body.get("scripts", [])
+        settings = body.get("settings", {})
+        if not scripts:
+            return {"ok": False, "error": "No scripts to save"}
+
+        # Sanitize filename
+        safe_name = "".join(c if c.isalnum() or c in "-_" else "_" for c in name)
+        filename = f"{safe_name}.seq.json"
+        filepath = Path(self.work_dir) / filename
+
+        seq_data = {"name": name, "scripts": scripts, "settings": settings}
+        filepath.write_text(json.dumps(seq_data, indent=2, ensure_ascii=False), encoding="utf-8")
+        return {"ok": True, "path": str(filepath)}
+
+    def _seq_load(self, name: str) -> dict:
+        """Load a .seq.json sequence file."""
+        if not name:
+            return {"error": "No sequence name specified"}
+
+        # Try exact match, then with extension
+        work = Path(self.work_dir)
+        candidates = [
+            work / f"{name}.seq.json",
+            work / name,
+        ]
+        for p in candidates:
+            if p.exists() and p.suffix == ".json":
+                try:
+                    data = json.loads(p.read_text(encoding="utf-8"))
+                    return data
+                except Exception as e:
+                    return {"error": str(e)}
+
+        # List available sequences
+        seqs = [f.stem.replace(".seq", "") for f in work.glob("*.seq.json")]
+        return {"error": f"Sequence not found: {name}. Available: {', '.join(seqs) or 'none'}"}
 
     # Response helpers
     def _html(self, content: str) -> None:
