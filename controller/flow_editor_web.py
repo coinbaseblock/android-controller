@@ -858,7 +858,7 @@ input:focus, select:focus, textarea:focus { outline: none; border-color: var(--b
       <!-- Station Manager -->
       <div class="sidebar-section" data-hover-scope="stations">
         <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px">
-          <h3 style="margin-bottom:0">Stations (1-11)</h3>
+          <h3 style="margin-bottom:0">Stations</h3>
           <button class="btn btn-sm" onclick="stationCreateAll()" style="font-size:10px;padding:2px 6px" title="Create all missing station files">+ Create All</button>
         </div>
         <div id="stationGrid" style="display:grid;grid-template-columns:repeat(6,1fr);gap:4px;margin-bottom:6px"></div>
@@ -1272,14 +1272,18 @@ async function deleteFile(path) {
 // ============================================================
 // STATION MANAGER
 // ============================================================
-let _stationFiles = {};  // {1: '/work/station-01.urf.json', 2: null, ...}
+let _stationFiles = {};  // {start: '/work/station-start.urf.json', 1: '...', ..., end: '...'}
 
 function stationRefresh() {
   // Build map of existing station files from available files
   _stationFiles = {};
+  _stationFiles['start'] = null;
   for (let i = 1; i <= 11; i++) _stationFiles[i] = null;
+  _stationFiles['end'] = null;
   _availableFiles.forEach(f => {
     const name = f.split('/').pop();
+    if (name === 'station-start.urf.json') { _stationFiles['start'] = f; return; }
+    if (name === 'station-end.urf.json') { _stationFiles['end'] = f; return; }
     const m = name.match(/^station-(\d+)\.urf\.json$/);
     if (m) _stationFiles[parseInt(m[1])] = f;
   });
@@ -1289,7 +1293,32 @@ function stationRefresh() {
 function stationRenderGrid() {
   const grid = document.getElementById('stationGrid');
   if (!grid) return;
+
+  // Helper to render a marker button (start/end)
+  function renderMarker(key, label) {
+    const exists = !!_stationFiles[key];
+    const isActive = _stationFiles[key] === filePath;
+    const bgColor = isActive ? 'var(--blue)' : exists ? (key === 'start' ? '#2e7d32' : '#c62828') : 'var(--bg3)';
+    const color = (isActive || exists) ? '#fff' : 'var(--text2)';
+    const border = isActive ? '2px solid var(--blue)' : '1px solid var(--border)';
+    const title = exists ? 'Click to edit station-' + key : 'Click to create station-' + key;
+    return `<div onclick="stationClick('${key}')" title="${title}" style="
+      display:flex;align-items:center;justify-content:center;gap:4px;
+      width:100%;padding:4px 0;border-radius:6px;font-size:11px;font-weight:700;
+      background:${bgColor};color:${color};border:${border};cursor:pointer;
+      transition:all .15s;position:relative;
+    " onmouseover="this.style.transform='scale(1.03)'" onmouseout="this.style.transform='scale(1)'">
+      ${label}
+      ${!exists ? '<span style="font-size:8px;opacity:.6;margin-left:2px">+</span>' : ''}
+    </div>`;
+  }
+
   let html = '';
+
+  // START marker (full width above grid)
+  html += `<div style="grid-column:1/-1;margin-bottom:2px">${renderMarker('start', '&#9654; START')}</div>`;
+
+  // Numbered stations 1-11
   for (let i = 1; i <= 11; i++) {
     const exists = !!_stationFiles[i];
     const isActive = _stationFiles[i] === filePath;
@@ -1297,39 +1326,50 @@ function stationRenderGrid() {
     const bg = isActive ? 'var(--blue)' : exists ? 'var(--green)' : 'var(--bg3)';
     const color = (isActive || exists) ? '#fff' : 'var(--text2)';
     const border = isActive ? '2px solid var(--blue)' : '1px solid var(--border)';
-    const cursor = exists ? 'pointer' : 'pointer';
     const title = exists ? 'Click to edit station-' + num : 'Click to create station-' + num;
     html += `<div onclick="stationClick(${i})" title="${title}" style="
       display:flex;align-items:center;justify-content:center;
       width:100%;aspect-ratio:1;border-radius:6px;font-size:12px;font-weight:700;
-      background:${bg};color:${color};border:${border};cursor:${cursor};
+      background:${bg};color:${color};border:${border};cursor:pointer;
       transition:all .15s;position:relative;
     " onmouseover="this.style.transform='scale(1.1)'" onmouseout="this.style.transform='scale(1)'">
       ${i}
       ${!exists ? '<span style="position:absolute;bottom:1px;right:2px;font-size:7px;opacity:.6">+</span>' : ''}
     </div>`;
   }
+
+  // END marker (full width below grid)
+  html += `<div style="grid-column:1/-1;margin-top:2px">${renderMarker('end', '&#9632; END')}</div>`;
+
   grid.innerHTML = html;
 }
 
 function stationClick(num) {
-  const path = _stationFiles[num];
+  const key = (num === 'start' || num === 'end') ? num : parseInt(num);
+  const path = _stationFiles[key];
   if (path) {
     loadFile(path);
   } else {
-    stationCreate(num);
+    stationCreate(key);
   }
 }
 
 async function stationCreate(num) {
-  const nn = String(num).padStart(2, '0');
-  const fileName = 'station-' + nn + '.urf.json';
+  let fileName, displayName;
+  if (num === 'start' || num === 'end') {
+    fileName = 'station-' + num + '.urf.json';
+    displayName = num === 'start' ? 'Station START' : 'Station END';
+  } else {
+    const nn = String(num).padStart(2, '0');
+    fileName = 'station-' + nn + '.urf.json';
+    displayName = 'Station ' + nn;
+  }
   const path = '/work/' + fileName;
   const pkg = recording?.meta?.app_package || '';
   const newRec = {
     version: 2,
     meta: {
-      name: 'Station ' + nn,
+      name: displayName,
       created: new Date().toISOString(),
       device: recording?.meta?.device || '',
       screen_width: screenNaturalW || 1080,
@@ -1359,18 +1399,27 @@ async function stationCreate(num) {
 }
 
 async function stationCreateAll() {
-  if (!confirm('Create all missing station files (station-01 to station-11)?')) return;
+  if (!confirm('Create all missing station files (start, 01-11, end)?')) return;
   let created = 0;
-  for (let i = 1; i <= 11; i++) {
-    if (!_stationFiles[i]) {
-      const nn = String(i).padStart(2, '0');
-      const fileName = 'station-' + nn + '.urf.json';
+  // Create start/end and numbered stations
+  const allKeys = ['start', 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 'end'];
+  for (const key of allKeys) {
+    if (!_stationFiles[key]) {
+      let fileName, displayName;
+      if (key === 'start' || key === 'end') {
+        fileName = 'station-' + key + '.urf.json';
+        displayName = key === 'start' ? 'Station START' : 'Station END';
+      } else {
+        const nn = String(key).padStart(2, '0');
+        fileName = 'station-' + nn + '.urf.json';
+        displayName = 'Station ' + nn;
+      }
       const path = '/work/' + fileName;
       const pkg = recording?.meta?.app_package || '';
       const newRec = {
         version: 2,
         meta: {
-          name: 'Station ' + nn,
+          name: displayName,
           created: new Date().toISOString(),
           device: recording?.meta?.device || '',
           screen_width: screenNaturalW || 1080,
@@ -1398,10 +1447,12 @@ async function stationCreateAll() {
 }
 
 function stationAddAllToSeq() {
-  // Add all existing station files (in order) to sequence runner
+  // Add all existing station files (in order) to sequence runner: start -> 1..11 -> end
+  // Only adds stations that actually exist
   let added = 0;
-  for (let i = 1; i <= 11; i++) {
-    const path = _stationFiles[i];
+  const orderedKeys = ['start', 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 'end'];
+  for (const key of orderedKeys) {
+    const path = _stationFiles[key];
     if (path) {
       const name = path.split('/').pop();
       seqScripts.push({path, name, enabled: true});
@@ -1409,7 +1460,7 @@ function stationAddAllToSeq() {
     }
   }
   seqRenderList();
-  toast('Added ' + added + ' stations to sequence');
+  toast('Added ' + added + ' stations to sequence (start \u2192 stations \u2192 end)');
 }
 
 // Initialize station grid after file list loads
