@@ -858,10 +858,10 @@ input:focus, select:focus, textarea:focus { outline: none; border-color: var(--b
       <!-- Station Manager -->
       <div class="sidebar-section" data-hover-scope="stations">
         <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px">
-          <h3 style="margin-bottom:0">Stations (1-10)</h3>
+          <h3 style="margin-bottom:0">Stations (1-11)</h3>
           <button class="btn btn-sm" onclick="stationCreateAll()" style="font-size:10px;padding:2px 6px" title="Create all missing station files">+ Create All</button>
         </div>
-        <div id="stationGrid" style="display:grid;grid-template-columns:repeat(5,1fr);gap:4px;margin-bottom:6px"></div>
+        <div id="stationGrid" style="display:grid;grid-template-columns:repeat(6,1fr);gap:4px;margin-bottom:6px"></div>
         <div style="display:flex;gap:4px;flex-wrap:wrap">
           <button class="btn btn-sm" onclick="stationAddAllToSeq()" style="font-size:10px;padding:2px 6px" title="Add all stations to Sequence Runner">Add All to Seq</button>
           <button class="btn btn-sm" onclick="stationRefresh()" style="font-size:10px;padding:2px 6px">Refresh</button>
@@ -962,6 +962,16 @@ input:focus, select:focus, textarea:focus { outline: none; border-color: var(--b
         <div class="btn-group" style="gap:4px">
           <button class="btn btn-sm btn-primary" onclick="window.open('/station-data','_blank')" title="Open station data viewer in new tab">Open Data Viewer</button>
           <button class="btn btn-sm" onclick="refreshExtractLogs()" title="Refresh extract log count">Refresh</button>
+        </div>
+      </div>
+
+      <!-- Station Logs Viewer -->
+      <div class="sidebar-section" data-hover-scope="station-logs">
+        <h3>Station Logs</h3>
+        <div id="stationLogSummary" style="font-size:11px;color:var(--text2);margin-bottom:6px">No playback logs yet</div>
+        <div class="btn-group" style="gap:4px">
+          <button class="btn btn-sm btn-primary" onclick="window.open('/station-logs','_blank')" title="View per-station round-by-round playback logs">Open Log Viewer</button>
+          <button class="btn btn-sm" onclick="refreshStationLogs()" title="Refresh station log count">Refresh</button>
         </div>
       </div>
     </div>
@@ -1267,7 +1277,7 @@ let _stationFiles = {};  // {1: '/work/station-01.urf.json', 2: null, ...}
 function stationRefresh() {
   // Build map of existing station files from available files
   _stationFiles = {};
-  for (let i = 1; i <= 10; i++) _stationFiles[i] = null;
+  for (let i = 1; i <= 11; i++) _stationFiles[i] = null;
   _availableFiles.forEach(f => {
     const name = f.split('/').pop();
     const m = name.match(/^station-(\d+)\.urf\.json$/);
@@ -1280,7 +1290,7 @@ function stationRenderGrid() {
   const grid = document.getElementById('stationGrid');
   if (!grid) return;
   let html = '';
-  for (let i = 1; i <= 10; i++) {
+  for (let i = 1; i <= 11; i++) {
     const exists = !!_stationFiles[i];
     const isActive = _stationFiles[i] === filePath;
     const num = String(i).padStart(2, '0');
@@ -1349,9 +1359,9 @@ async function stationCreate(num) {
 }
 
 async function stationCreateAll() {
-  if (!confirm('Create all missing station files (station-01 to station-10)?')) return;
+  if (!confirm('Create all missing station files (station-01 to station-11)?')) return;
   let created = 0;
-  for (let i = 1; i <= 10; i++) {
+  for (let i = 1; i <= 11; i++) {
     if (!_stationFiles[i]) {
       const nn = String(i).padStart(2, '0');
       const fileName = 'station-' + nn + '.urf.json';
@@ -1390,7 +1400,7 @@ async function stationCreateAll() {
 function stationAddAllToSeq() {
   // Add all existing station files (in order) to sequence runner
   let added = 0;
-  for (let i = 1; i <= 10; i++) {
+  for (let i = 1; i <= 11; i++) {
     const path = _stationFiles[i];
     if (path) {
       const name = path.split('/').pop();
@@ -2382,6 +2392,29 @@ async function refreshExtractLogs() {
 // Auto-refresh extract log summary periodically
 setTimeout(() => refreshExtractLogs(), 2000);
 setInterval(() => refreshExtractLogs(), 30000);
+
+async function refreshStationLogs() {
+  try {
+    const data = await api('GET', '/station-logs');
+    const logs = data.logs || [];
+    const el = document.getElementById('stationLogSummary');
+    if (!logs.length) {
+      el.textContent = 'No playback logs yet';
+    } else {
+      const totalRuns = logs.reduce((s, l) => s + l.total_runs, 0);
+      const totalOk = logs.reduce((s, l) => s + l.success_runs, 0);
+      const totalErr = logs.reduce((s, l) => s + l.error_runs, 0);
+      el.innerHTML = '<strong>' + logs.length + '</strong> stations, <strong>' + totalRuns + '</strong> rounds (' +
+        '<span style="color:var(--green)">' + totalOk + ' OK</span>' +
+        (totalErr > 0 ? ', <span style="color:var(--red)">' + totalErr + ' err</span>' : '') + ')';
+    }
+  } catch (e) {
+    // ignore
+  }
+}
+// Auto-refresh station log summary periodically
+setTimeout(() => refreshStationLogs(), 2500);
+setInterval(() => refreshStationLogs(), 30000);
 
 // ============================================================
 // DRAG & DROP
@@ -3773,6 +3806,364 @@ startAutoRefresh();
 
 
 # ============================================================
+# Station Logs Viewer - Per-station round-by-round playback logs
+# ============================================================
+
+STATION_LOGS_HTML = r"""<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Station Logs Viewer</title>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:'Segoe UI',system-ui,sans-serif;background:#0f1117;color:#e1e4e8;line-height:1.5}
+.header{background:#161b22;padding:14px 24px;border-bottom:1px solid #30363d;display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px}
+.header h1{font-size:18px;font-weight:600;color:#58a6ff}
+.header .back-link{color:#8b949e;text-decoration:none;font-size:13px}
+.header .back-link:hover{color:#58a6ff}
+.controls{padding:12px 24px;background:#161b22;border-bottom:1px solid #21262d;display:flex;gap:12px;align-items:center;flex-wrap:wrap}
+.controls button{background:#21262d;border:1px solid #30363d;color:#c9d1d9;padding:6px 14px;border-radius:6px;cursor:pointer;font-size:13px}
+.controls button:hover{background:#30363d}
+.controls button.active{background:#1f6feb;border-color:#1f6feb;color:#fff}
+.controls .auto-refresh{display:flex;align-items:center;gap:6px;font-size:12px;color:#8b949e}
+.controls .auto-refresh input{accent-color:#1f6feb}
+.container{max-width:1600px;margin:0 auto;padding:20px}
+.summary-bar{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:8px;margin-bottom:16px}
+.summary-card{background:#161b22;border:1px solid #30363d;border-radius:6px;padding:10px 14px}
+.summary-card .label{font-size:10px;color:#8b949e;text-transform:uppercase;letter-spacing:.5px}
+.summary-card .value{font-size:20px;font-weight:700;color:#c9d1d9;margin-top:2px}
+.summary-card .value.success{color:#3fb950}
+.summary-card .value.error{color:#f85149}
+.log-grid{display:grid;grid-template-columns:280px 1fr;gap:16px;min-height:calc(100vh - 200px)}
+.station-list{background:#161b22;border:1px solid #30363d;border-radius:8px;overflow:hidden}
+.station-list h3{padding:12px 16px;font-size:13px;color:#8b949e;border-bottom:1px solid #21262d;text-transform:uppercase;letter-spacing:.5px}
+.station-item{padding:10px 16px;border-bottom:1px solid #21262d;cursor:pointer;transition:background .15s}
+.station-item:hover{background:#1c2129}
+.station-item.active{background:#1f6feb22;border-left:3px solid #1f6feb}
+.station-item .name{font-weight:600;font-size:14px;color:#c9d1d9}
+.station-item .info{font-size:11px;color:#8b949e;margin-top:2px;display:flex;gap:12px}
+.station-item .info .ok{color:#3fb950}
+.station-item .info .err{color:#f85149}
+.log-viewer{background:#161b22;border:1px solid #30363d;border-radius:8px;overflow:hidden}
+.log-viewer-header{padding:12px 16px;border-bottom:1px solid #21262d;display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px}
+.log-viewer-header h3{font-size:14px;color:#c9d1d9}
+.log-viewer-header .meta{font-size:12px;color:#8b949e}
+.run-list{overflow-y:auto;max-height:calc(100vh - 280px);padding:8px}
+.run-card{background:#0d1117;border:1px solid #21262d;border-radius:6px;margin-bottom:8px;overflow:hidden}
+.run-header{padding:10px 14px;display:flex;justify-content:space-between;align-items:center;cursor:pointer;transition:background .15s}
+.run-header:hover{background:#161b22}
+.run-header .left{display:flex;align-items:center;gap:12px}
+.run-header .loop-num{font-weight:700;font-size:15px;color:#58a6ff}
+.run-header .time{font-size:12px;color:#8b949e;font-family:'Consolas',monospace}
+.run-header .duration{font-size:12px;color:#c9d1d9;font-family:'Consolas',monospace}
+.badge{padding:2px 10px;border-radius:10px;font-size:11px;font-weight:600;text-transform:uppercase}
+.badge-success{background:#1f3d2a;color:#3fb950}
+.badge-error{background:#3d1f1f;color:#f85149}
+.badge-running{background:#1f303d;color:#58a6ff}
+.run-body{display:none;padding:0}
+.run-body.open{display:block}
+.ctrl-table{width:100%;border-collapse:collapse;font-size:12px}
+.ctrl-table th{text-align:left;padding:6px 10px;background:#161b22;color:#8b949e;font-weight:600;font-size:10px;text-transform:uppercase;letter-spacing:.5px;position:sticky;top:0}
+.ctrl-table td{padding:5px 10px;border-bottom:1px solid #21262d;vertical-align:top}
+.ctrl-table tr:hover{background:#1c2129}
+.ctrl-table tr.error-row{background:#1f121544}
+.type-badge{display:inline-block;padding:1px 8px;border-radius:4px;font-size:10px;font-weight:600;min-width:60px;text-align:center}
+.type-touch{background:#3d2f1f;color:#d29922}
+.type-gesture{background:#1f3d2a;color:#3fb950}
+.type-element{background:#1f2a3d;color:#58a6ff}
+.type-app{background:#2d1f3d;color:#bc8cff}
+.type-key{background:#1f3d3d;color:#39d2c0}
+.type-screenshot{background:#3d3d1f;color:#d2d239}
+.type-wait{background:#21262d;color:#8b949e}
+.type-shell{background:#2a1f1f;color:#f0883e}
+.type-extract{background:#1f3d33;color:#3fb9a0}
+.type-marker{background:#21262d;color:#8b949e}
+.result-ok{color:#3fb950}
+.result-err{color:#f85149}
+.ts-col{color:#8b949e;font-family:'Consolas',monospace;font-size:11px;white-space:nowrap}
+.desc-col{max-width:350px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.detail-toggle{cursor:pointer;color:#58a6ff;font-size:10px;margin-left:4px}
+.detail-toggle:hover{text-decoration:underline}
+.detail-row{display:none;background:#0d1117}
+.detail-row.open{display:table-row}
+.detail-row td{padding:8px 14px}
+.detail-json{font-family:'Consolas',monospace;font-size:11px;color:#c9d1d9;white-space:pre-wrap;word-break:break-all;background:#0d1117;padding:8px;border-radius:4px;max-height:250px;overflow-y:auto}
+.run-stats{display:flex;gap:16px;font-size:11px;color:#8b949e;padding:6px 14px;border-top:1px solid #21262d;background:#0d1117}
+.run-stats .stat{display:flex;align-items:center;gap:4px}
+.run-stats strong{color:#c9d1d9}
+.empty{text-align:center;padding:40px;color:#8b949e}
+.arrow{display:inline-block;transition:transform .2s;margin-right:6px;font-size:10px}
+.arrow.open{transform:rotate(90deg)}
+.search-bar{margin-bottom:12px}
+.search-bar input{width:100%;padding:8px 12px;background:#0d1117;border:1px solid #30363d;border-radius:6px;color:#c9d1d9;font-size:13px;outline:none}
+.search-bar input:focus{border-color:#58a6ff}
+</style>
+</head>
+<body>
+
+<div class="header">
+  <h1>Station Logs</h1>
+  <a class="back-link" href="/">&larr; Back to Editor</a>
+</div>
+
+<div class="controls">
+  <button onclick="loadStationLogs()" title="Refresh station logs">Refresh</button>
+  <div class="auto-refresh">
+    <input type="checkbox" id="autoRefresh" checked>
+    <label for="autoRefresh">Auto-refresh (10s)</label>
+  </div>
+</div>
+
+<div class="container">
+  <div class="summary-bar" id="summaryBar"></div>
+  <div class="log-grid">
+    <div class="station-list">
+      <h3>Stations (1-11)</h3>
+      <div id="stationList"><div class="empty">Loading...</div></div>
+    </div>
+    <div class="log-viewer">
+      <div class="log-viewer-header">
+        <h3 id="viewerTitle">Select a station</h3>
+        <span class="meta" id="viewerMeta"></span>
+      </div>
+      <div class="search-bar" style="padding:0 16px">
+        <input type="text" id="searchInput" placeholder="Filter by type, action, description..." oninput="filterCtrls()">
+      </div>
+      <div class="run-list" id="runList">
+        <div class="empty">Select a station from the left panel to view its round-by-round logs</div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script>
+let stationLogs = [];
+let currentLogPath = '';
+let currentLogData = null;
+let autoRefreshTimer = null;
+
+async function apiGet(path) {
+  const res = await fetch('/api' + path);
+  return res.json();
+}
+
+async function loadStationLogs() {
+  try {
+    const data = await apiGet('/station-logs');
+    stationLogs = data.logs || [];
+    renderStationList();
+    renderSummary();
+    if (currentLogPath) {
+      const still = stationLogs.find(l => l.path === currentLogPath);
+      if (still) loadStationLog(currentLogPath);
+    }
+  } catch (e) {
+    document.getElementById('stationList').innerHTML = '<div class="empty">Error loading station logs</div>';
+  }
+}
+
+function renderSummary() {
+  const totalStations = stationLogs.length;
+  const totalRuns = stationLogs.reduce((s, l) => s + l.total_runs, 0);
+  const totalSuccess = stationLogs.reduce((s, l) => s + l.success_runs, 0);
+  const totalErrors = stationLogs.reduce((s, l) => s + l.error_runs, 0);
+  const el = document.getElementById('summaryBar');
+  el.innerHTML = [
+    '<div class="summary-card"><div class="label">Stations with Logs</div><div class="value">' + totalStations + ' / 11</div></div>',
+    '<div class="summary-card"><div class="label">Total Rounds</div><div class="value">' + totalRuns + '</div></div>',
+    '<div class="summary-card"><div class="label">Successful</div><div class="value success">' + totalSuccess + '</div></div>',
+    '<div class="summary-card"><div class="label">Errors</div><div class="value error">' + totalErrors + '</div></div>',
+  ].join('');
+}
+
+function renderStationList() {
+  const el = document.getElementById('stationList');
+  if (!stationLogs.length) {
+    el.innerHTML = '<div class="empty">No station playback logs found.<br><br>Run a station recording to generate logs.</div>';
+    return;
+  }
+  el.innerHTML = stationLogs.map(l =>
+    '<div class="station-item' + (l.path === currentLogPath ? ' active' : '') + '" onclick="loadStationLog(\'' + esc(l.path) + '\')">' +
+    '<div class="name">' + esc(l.station) + '</div>' +
+    '<div class="info">' +
+      '<span>Rounds: ' + l.total_runs + '</span>' +
+      '<span class="ok">OK: ' + l.success_runs + '</span>' +
+      '<span class="err">Err: ' + l.error_runs + '</span>' +
+      '<span>' + l.size_kb + ' KB</span>' +
+    '</div>' +
+    (l.last_run_at ? '<div style="font-size:10px;color:#6e7681;margin-top:2px">Last: ' + formatDateTime(l.last_run_at) + '</div>' : '') +
+    '</div>'
+  ).join('');
+}
+
+async function loadStationLog(path) {
+  currentLogPath = path;
+  renderStationList();
+  document.getElementById('viewerTitle').textContent = 'Loading...';
+
+  try {
+    const data = await apiGet('/station-log?path=' + encodeURIComponent(path));
+    if (data.error) {
+      document.getElementById('runList').innerHTML = '<div class="empty">' + esc(data.error) + '</div>';
+      return;
+    }
+    currentLogData = data;
+    const rec = data.recording || {};
+    document.getElementById('viewerTitle').textContent = rec.name || path.split('/').pop();
+    document.getElementById('viewerMeta').innerHTML =
+      'Device: ' + esc(rec.device || '-') + ' | Screen: ' + esc(rec.screen || '-') +
+      ' | Mode: ' + esc(rec.replay_mode || '-') + ' | Speed: ' + (rec.speed || 1) + 'x' +
+      ' | Frames: ' + (rec.total_frames || 0) + ' | Rounds: ' + (data.runs || []).length;
+    renderRuns(data.runs || []);
+  } catch (e) {
+    document.getElementById('runList').innerHTML = '<div class="empty">Error loading log data</div>';
+  }
+}
+
+function renderRuns(runs) {
+  const el = document.getElementById('runList');
+  if (!runs.length) {
+    el.innerHTML = '<div class="empty">No rounds recorded yet for this station</div>';
+    return;
+  }
+  // Show most recent runs first
+  el.innerHTML = runs.slice().reverse().map((run, displayIdx) => {
+    const ri = runs.length - 1 - displayIdx; // original index
+    return renderRun(run, ri);
+  }).join('');
+}
+
+function renderRun(run, ri) {
+  const ctrls = run.ctrls || [];
+  const errCount = ctrls.filter(c => c.result === 'error').length;
+  const okCount = ctrls.filter(c => c.result !== 'error').length;
+  const badgeCls = run.status === 'success' ? 'badge-success' : run.status === 'error' ? 'badge-error' : 'badge-running';
+  const startTime = run.started_at ? formatTime(run.started_at) : '-';
+  const durationMs = run.started_at && run.completed_at ? (new Date(run.completed_at) - new Date(run.started_at)) : 0;
+  const durStr = durationMs > 0 ? formatDuration(durationMs) : '-';
+  const totalExecMs = ctrls.reduce((s, c) => s + (c.exec_ms || 0), 0);
+
+  let html = '<div class="run-card" data-run="' + ri + '">';
+  html += '<div class="run-header" onclick="toggleRun(' + ri + ')">';
+  html += '<div class="left">';
+  html += '<span class="arrow" id="arrow-' + ri + '">&#9654;</span>';
+  html += '<span class="loop-num">Round #' + run.loop + '</span>';
+  html += '<span class="time">' + startTime + '</span>';
+  html += '<span class="duration">' + durStr + '</span>';
+  html += '</div>';
+  html += '<span class="badge ' + badgeCls + '">' + esc(run.status) + '</span>';
+  html += '</div>';
+
+  html += '<div class="run-body" id="run-' + ri + '">';
+
+  // Stats bar
+  html += '<div class="run-stats">';
+  html += '<div class="stat">Steps: <strong>' + ctrls.length + '</strong></div>';
+  html += '<div class="stat">OK: <strong style="color:#3fb950">' + okCount + '</strong></div>';
+  html += '<div class="stat">Errors: <strong style="color:' + (errCount > 0 ? '#f85149' : '#3fb950') + '">' + errCount + '</strong></div>';
+  html += '<div class="stat">Total exec: <strong>' + formatDuration(totalExecMs) + '</strong></div>';
+  html += '<div class="stat">Wall time: <strong>' + durStr + '</strong></div>';
+  html += '</div>';
+
+  // Ctrls table
+  if (ctrls.length) {
+    html += '<table class="ctrl-table">';
+    html += '<tr><th>#</th><th>Type</th><th>Action</th><th>Description</th><th>Time</th><th>Exec</th><th>Result</th></tr>';
+    ctrls.forEach((ctrl, ci) => {
+      const rowCls = ctrl.result === 'error' ? ' class="error-row"' : '';
+      const typeCls = 'type-' + (ctrl.type || 'touch');
+      const resCls = ctrl.result === 'error' ? 'result-err' : 'result-ok';
+      const resIcon = ctrl.result === 'error' ? '&#10007;' : '&#10003;';
+      const ctrlTime = ctrl.timestamp ? formatTime(ctrl.timestamp) : '-';
+
+      html += '<tr' + rowCls + ' data-desc="' + esc(ctrl.description || '').toLowerCase() + '" data-type="' + esc(ctrl.type || '') + '">';
+      html += '<td>' + ctrl.frame_id + '</td>';
+      html += '<td><span class="type-badge ' + typeCls + '">' + esc(ctrl.type || '-') + '</span></td>';
+      html += '<td>' + esc(ctrl.action || '-') + '</td>';
+      html += '<td class="desc-col">' + esc(ctrl.description || '-') + ' <span class="detail-toggle" onclick="toggleDetail(' + ri + ',' + ci + ',event)">[detail]</span></td>';
+      html += '<td class="ts-col">' + ctrlTime + '</td>';
+      html += '<td class="ts-col">' + (ctrl.exec_ms != null ? ctrl.exec_ms + 'ms' : '-') + '</td>';
+      html += '<td class="' + resCls + '">' + resIcon + (ctrl.error ? ' ' + esc(ctrl.error) : '') + '</td>';
+      html += '</tr>';
+
+      html += '<tr class="detail-row" id="detail-' + ri + '-' + ci + '"><td colspan="7"><div class="detail-json">' + esc(JSON.stringify(ctrl.details || {}, null, 2)) + '</div></td></tr>';
+    });
+    html += '</table>';
+  }
+
+  html += '</div></div>';
+  return html;
+}
+
+function toggleRun(ri) {
+  const body = document.getElementById('run-' + ri);
+  const arrow = document.getElementById('arrow-' + ri);
+  if (body) body.classList.toggle('open');
+  if (arrow) arrow.classList.toggle('open');
+}
+
+function toggleDetail(ri, ci, event) {
+  event.stopPropagation();
+  const el = document.getElementById('detail-' + ri + '-' + ci);
+  if (el) el.classList.toggle('open');
+}
+
+function filterCtrls() {
+  const q = document.getElementById('searchInput').value.toLowerCase().trim();
+  document.querySelectorAll('.ctrl-table tr[data-desc]').forEach(tr => {
+    if (!q) { tr.style.display = ''; return; }
+    const desc = tr.getAttribute('data-desc') || '';
+    const type = tr.getAttribute('data-type') || '';
+    tr.style.display = (desc.includes(q) || type.includes(q)) ? '' : 'none';
+  });
+}
+
+function formatTime(iso) {
+  try {
+    const d = new Date(iso);
+    return d.toLocaleTimeString('en-GB', {hour:'2-digit',minute:'2-digit',second:'2-digit',fractionalSecondDigits:3});
+  } catch(e) { return iso; }
+}
+
+function formatDateTime(iso) {
+  try {
+    const d = new Date(iso);
+    return d.toLocaleString('en-GB', {month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit',second:'2-digit'});
+  } catch(e) { return iso; }
+}
+
+function formatDuration(ms) {
+  if (ms < 1000) return ms + 'ms';
+  const s = Math.floor(ms / 1000);
+  if (s < 60) return s + '.' + String(ms % 1000).padStart(3, '0').slice(0,1) + 's';
+  const m = Math.floor(s / 60);
+  return m + 'm ' + (s % 60) + 's';
+}
+
+function esc(s) { return String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;'); }
+
+// Auto-refresh
+function startAutoRefresh() {
+  stopAutoRefresh();
+  if (document.getElementById('autoRefresh').checked) {
+    autoRefreshTimer = setInterval(loadStationLogs, 10000);
+  }
+}
+function stopAutoRefresh() {
+  if (autoRefreshTimer) { clearInterval(autoRefreshTimer); autoRefreshTimer = null; }
+}
+document.getElementById('autoRefresh').addEventListener('change', startAutoRefresh);
+
+// Init
+loadStationLogs();
+startAutoRefresh();
+</script>
+</body>
+</html>"""
+
+
+# ============================================================
 # HTTP Server
 # ============================================================
 
@@ -3814,6 +4205,13 @@ class EditorHandler(BaseHTTPRequestHandler):
             self._json(self._read_extract_log(fp))
         elif path == "/station-data":
             self._html(STATION_DATA_HTML)
+        elif path == "/station-logs":
+            self._html(STATION_LOGS_HTML)
+        elif path == "/api/station-logs":
+            self._json(self._list_station_logs())
+        elif path == "/api/station-log":
+            fp = params.get("path", [""])[0]
+            self._json(self._read_station_log(fp))
         else:
             self._error(404, "Not Found")
 
@@ -4491,6 +4889,64 @@ class EditorHandler(BaseHTTPRequestHandler):
                 return sum(1 for line in f if line.strip())
         except Exception:
             return 0
+
+    # -------- Station Playback Logs endpoints --------
+
+    def _list_station_logs(self) -> dict:
+        """List all station playback JSON log files in the work/logs directory."""
+        log_dir = Path(self.work_dir) / "logs"
+        logs = []
+        if log_dir.exists():
+            for p in sorted(log_dir.glob("station-*-playback.json")):
+                try:
+                    data = json.loads(p.read_text(encoding="utf-8"))
+                    runs = data.get("runs", [])
+                    rec = data.get("recording", {})
+                    total_runs = len(runs)
+                    success_runs = sum(1 for r in runs if r.get("status") == "success")
+                    error_runs = sum(1 for r in runs if r.get("status") == "error")
+                    last_run_at = runs[-1].get("completed_at") or runs[-1].get("started_at") if runs else None
+                    logs.append({
+                        "path": str(p),
+                        "name": p.name,
+                        "station": rec.get("name", p.stem.replace("-playback", "")),
+                        "total_runs": total_runs,
+                        "success_runs": success_runs,
+                        "error_runs": error_runs,
+                        "total_frames": rec.get("total_frames", 0),
+                        "last_run_at": last_run_at,
+                        "size_kb": round(p.stat().st_size / 1024, 1),
+                    })
+                except (json.JSONDecodeError, Exception):
+                    logs.append({
+                        "path": str(p),
+                        "name": p.name,
+                        "station": p.stem.replace("-playback", ""),
+                        "total_runs": 0,
+                        "success_runs": 0,
+                        "error_runs": 0,
+                        "total_frames": 0,
+                        "last_run_at": None,
+                        "size_kb": round(p.stat().st_size / 1024, 1),
+                    })
+        return {"logs": logs}
+
+    def _read_station_log(self, path: str) -> dict:
+        """Read a station playback log JSON file and return its full data."""
+        if not path:
+            return {"error": "No path specified"}
+        p = Path(path)
+        if not p.exists():
+            return {"error": f"File not found: {path}"}
+        try:
+            p.resolve().relative_to(Path(self.work_dir).resolve())
+        except ValueError:
+            return {"error": "Cannot read files outside work directory"}
+        try:
+            data = json.loads(p.read_text(encoding="utf-8"))
+            return data
+        except Exception as e:
+            return {"error": str(e)}
 
     # -------- Sequence Runner endpoints --------
 

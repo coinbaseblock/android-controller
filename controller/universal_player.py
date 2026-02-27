@@ -251,7 +251,9 @@ class UniversalPlayer:
         # New recordings are already normalized to t=0, but older recordings
         # may still carry an initial offset.
         initial_offset = (self._frames[0].t / 1000.0) / self.speed if self._frames else 0
-        playback_start = time.time() - initial_offset
+        # Use perf_counter for high-resolution monotonic timing to avoid
+        # drift from system clock adjustments (NTP, suspend, etc.).
+        playback_start = time.perf_counter() - initial_offset
         paused_total = 0.0  # seconds spent in pause state (excluded from playback clock)
 
         for i, frame in enumerate(self._frames):
@@ -261,26 +263,27 @@ class UniversalPlayer:
             # Wait for paused state; track how long we were paused so the
             # playback clock is not thrown off by user-initiated pauses.
             if self.state.status == "paused":
-                pause_start = time.time()
+                pause_start = time.perf_counter()
                 while self.state.status == "paused":
                     time.sleep(0.5)
-                paused_total += time.time() - pause_start
+                paused_total += time.perf_counter() - pause_start
 
             self.state.current_step = i + 1
             self.state.current_step_desc = self._describe_frame(frame)
 
             # Timing: sleep until the wall-clock moment this frame should fire.
             # Using an absolute target avoids drift caused by frame execution time.
+            # perf_counter provides sub-millisecond precision on most platforms.
             if self.speed > 0:
                 target_wall = playback_start + paused_total + (frame.t / 1000.0) / self.speed
-                now = time.time()
-                if target_wall > now + 0.01:
+                now = time.perf_counter()
+                if target_wall > now + 0.001:
                     time.sleep(target_wall - now)
 
             # Execute
-            frame_start = time.time()
+            frame_start = time.perf_counter()
             success = self._execute_frame(frame, i, loop_idx)
-            frame_exec_ms = int((time.time() - frame_start) * 1000)
+            frame_exec_ms = int((time.perf_counter() - frame_start) * 1000)
 
             # Log this ctrl to JSON logger
             if self._logger and build_ctrl_details is not None:
