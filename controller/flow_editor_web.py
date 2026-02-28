@@ -436,11 +436,12 @@ input:focus, select:focus, textarea:focus { outline: none; border-color: var(--b
 .sidebar { width: 280px; background: var(--bg2); border-right: 1px solid var(--border); display: flex; flex-direction: column; flex-shrink: 0; overflow-y: auto; }
 .content { flex: 1; display: flex; flex-direction: column; overflow: hidden; }
 .timeline { flex: 1; overflow-y: auto; padding: 12px; }
-.bottom-panel { display: flex; border-top: 1px solid var(--border); flex-shrink: 0; max-height: 260px; background: var(--bg2); }
+.bottom-panel { display: flex; border-top: 2px solid var(--blue); flex-shrink: 0; min-height: 120px; max-height: 280px; background: var(--bg2); }
 .bottom-panel > .bp-col { flex: 1; overflow-y: auto; border-right: 1px solid var(--border); min-width: 0; }
 .bottom-panel > .bp-col:last-child { border-right: none; }
-.bottom-panel .sidebar-section { border-bottom: 1px solid var(--border); }
+.bottom-panel .sidebar-section { border-bottom: 1px solid var(--border); padding: 10px 12px; }
 .bottom-panel .sidebar-section:last-child { border-bottom: none; }
+.bottom-panel .sidebar-section h3 { font-size: 11px; text-transform: uppercase; letter-spacing: .7px; color: var(--blue); margin-bottom: 6px; }
 /* detail-panel styles now in .detail-section and .right-panel */
 
 /* === BUTTONS === */
@@ -4955,6 +4956,9 @@ class EditorHandler(BaseHTTPRequestHandler):
             "meta": "ℹ️",
             "settings": "⚙️",
             "bulk-actions": "🔧",
+            "station-data": "📊",
+            "station-logs": "📜",
+            "sequence": "🔁",
             "toolbar": "🔲",
             "timeline": "📋",
             "timeline-frame": "▶",
