@@ -32,6 +32,11 @@ COPY universal_recorder.py /usr/local/bin/universal-recorder.py
 COPY universal_player.py /usr/local/bin/universal-player.py
 COPY flow_editor.py /usr/local/bin/flow-editor.py
 COPY flow_editor_web.py /usr/local/bin/flow-editor-web.py
+COPY sequence_runner.py /usr/local/bin/sequence_runner.py
+COPY playback_logger.py /usr/local/bin/playback_logger.py
+
+# Copy importable versions (underscore names) for modules that are also executed as scripts
+COPY universal_player.py /usr/local/bin/universal_player.py
 
 # แปลง line endings จาก Windows (CRLF) เป็น Unix (LF)
 RUN dos2unix /usr/local/bin/*.py
@@ -47,7 +52,8 @@ RUN chmod +x /usr/local/bin/touch-event-capture.py \
     && chmod +x /usr/local/bin/universal-recorder.py \
     && chmod +x /usr/local/bin/universal-player.py \
     && chmod +x /usr/local/bin/flow-editor.py \
-    && chmod +x /usr/local/bin/flow-editor-web.py
+    && chmod +x /usr/local/bin/flow-editor-web.py \
+    && chmod +x /usr/local/bin/sequence_runner.py
 
 # คงอยู่รอคำสั่งจาก docker-compose (ทั้งโหมด server และ client ใช้ภาพเดียวกัน)
 CMD ["bash","-lc","echo image ready; tail -f /dev/null"]
