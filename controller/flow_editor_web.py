@@ -2875,46 +2875,11 @@ async function stopPlayback() {
     const res = await api('POST', '/stop');
 
     if (wasWebRecording && recording) {
-      // Wait a moment for device recording file to be written
-      await new Promise(r => setTimeout(r, 800));
-
-      // Try to load device-recorded frames and merge with web frames
-      if (filePath) {
-        try {
-          const deviceData = await api('GET', '/load?path=' + encodeURIComponent(filePath));
-          if (deviceData && deviceData.frames && deviceData.frames.length) {
-            // Merge: device frames that are NOT duplicates of web frames
-            // (web frames from adb input tap also appear in getevent, skip those)
-            const webTimes = new Set(webFrames.map(f => f.t));
-            const deviceOnlyFrames = deviceData.frames.filter(f => {
-              // Keep device frames that don't overlap with web frame times (within 500ms tolerance)
-              if (f.type !== 'gesture' && f.type !== 'touch') return true;
-              for (const wt of webTimes) {
-                if (Math.abs(f.t - wt) < 500) return false;
-              }
-              return true;
-            });
-
-            if (deviceOnlyFrames.length) {
-              // Add device-only frames (mobile touches) to recording
-              let maxId = Math.max(0, ...recording.frames.map(f => f.id));
-              deviceOnlyFrames.forEach(df => {
-                df.id = ++maxId;
-                df.note = (df.note || '') + (df.note ? ' ' : '') + '[device]';
-                recording.frames.push(df);
-              });
-              // Sort all frames by time
-              recording.frames.sort((a, b) => a.t - b.t);
-              // Re-assign IDs in order
-              recording.frames.forEach((f, i) => f.id = i + 1);
-            }
-          }
-        } catch (mergeErr) {
-          console.log('Merge error (non-fatal):', mergeErr);
-        }
-      }
-
-      // Save merged recording
+      // Web recording frames are the source of truth.
+      // The device recorder (universal_recorder.py via getevent) captures the
+      // same actions sent by the web UI (adb input tap/keyevent/ctrl) which
+      // produces duplicate gesture, key, and extract frames.
+      // Skip device merge entirely — just save the web frames as-is.
       await saveFile();
       refreshAll();
       toast('Recording stopped - ' + recording.frames.length + ' frames saved', 'success');
