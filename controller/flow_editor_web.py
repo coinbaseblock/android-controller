@@ -574,6 +574,21 @@ input:focus, select:focus, textarea:focus { outline: none; border-color: var(--b
 .btn-stop:active { transform: scale(0.95); }
 .btn-stop:disabled { opacity: .4; cursor: not-allowed; transform: none; pointer-events: none; }
 
+/* Loop Run button */
+.btn-loop-run { background: #8957e5; border-color: #8957e5; color: #fff; display: inline-flex; align-items: center; gap: 5px; position: relative; z-index: 1; pointer-events: auto; cursor: pointer; transition: all .2s ease; font-weight: 600; }
+.btn-loop-run:hover { background: #a371f7; transform: scale(1.05); }
+.btn-loop-run:active { transform: scale(0.95); }
+.btn-loop-run:disabled { opacity: .4; cursor: not-allowed; transform: none; pointer-events: none; }
+.btn-loop-run.active { background: #6e40c9; animation: pulse-loop 1.5s ease-in-out infinite; }
+@keyframes pulse-loop { 0%,100% { box-shadow: 0 0 0 0 rgba(137,87,229,.5); } 50% { box-shadow: 0 0 8px 4px rgba(137,87,229,.3); } }
+.loop-run-controls { display: flex; align-items: center; gap: 6px; }
+.loop-run-controls input[type="number"] { width: 48px; padding: 2px 4px; border: 1px solid var(--border); border-radius: 4px; background: var(--bg2); color: var(--text1); font-size: 11px; text-align: center; }
+.loop-run-controls label { font-size: 10px; color: var(--text2); display: flex; align-items: center; gap: 3px; cursor: pointer; white-space: nowrap; }
+.loop-run-controls label input[type="checkbox"] { margin: 0; cursor: pointer; }
+.loop-run-status { font-size: 11px; color: var(--text2); max-width: 240px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.btn-loop-stop { background: #6e7681; border-color: #6e7681; color: #fff; display: inline-flex; align-items: center; gap: 4px; cursor: pointer; transition: all .2s ease; }
+.btn-loop-stop:hover { background: #8b949e; transform: scale(1.05); }
+
 /* Visual feedback on click (no overlay blocking clicks) */
 
 .rec-dot { display: inline-block; width: 10px; height: 10px; border-radius: 50%; background: #ff4444; transition: all .2s; }
@@ -830,6 +845,21 @@ input:focus, select:focus, textarea:focus { outline: none; border-color: var(--b
         <div class="playback-progress-bar" id="progressBar"></div>
       </div>
       <span class="playback-step" id="stepInfo"></span>
+    </div>
+    <div class="sep" style="width:1px;height:24px;background:var(--border);margin:0 4px"></div>
+    <!-- Loop Run Controls -->
+    <div class="loop-run-controls">
+      <button type="button" class="btn btn-sm btn-loop-run" id="btnLoopRun" onclick="loopRunAll()" title="Run all sequence scripts with loop">
+        &#9654;&#8635; Loop Run
+      </button>
+      <label title="Number of loops (0 = forever)">Loops
+        <input type="number" id="loopRunCount" value="3" min="0" step="1">
+      </label>
+      <label title="Run forever until stopped"><input type="checkbox" id="loopRunForever"> Forever</label>
+      <button type="button" class="btn btn-sm btn-loop-stop" id="btnLoopStop" onclick="loopRunStop()" style="display:none" title="Stop loop run">
+        &#9632; Stop
+      </button>
+      <span class="loop-run-status" id="loopRunStatus"></span>
     </div>
     <span class="spacer"></span>
     <button class="btn btn-sm" onclick="loadFileList()">Refresh</button>
@@ -2372,6 +2402,109 @@ function seqPollStatus() {
         seqRunning = false;
         clearInterval(seqPollTimer);
         seqPollTimer = null;
+      }
+    }
+  }, 1500);
+}
+
+// ============================================================
+// LOOP RUN ALL - Quick loop run button
+// ============================================================
+let loopRunPollTimer = null;
+
+// Toggle count input when forever is checked
+document.addEventListener('DOMContentLoaded', () => {
+  const foreverCb = document.getElementById('loopRunForever');
+  const countInput = document.getElementById('loopRunCount');
+  if (foreverCb && countInput) {
+    foreverCb.addEventListener('change', () => {
+      countInput.disabled = foreverCb.checked;
+      if (foreverCb.checked) countInput.value = '0';
+    });
+  }
+});
+
+async function loopRunAll() {
+  // Determine which scripts to run
+  let scripts = [];
+  const seqEnabled = seqScripts.filter(s => s.enabled);
+
+  if (seqEnabled.length > 0) {
+    // Use the sequence list if it has scripts
+    scripts = seqEnabled.map(s => ({path: s.path, enabled: true}));
+  } else if (_availableFiles && _availableFiles.length > 0) {
+    // Otherwise use all available .urf.json files
+    const sorted = [..._availableFiles].filter(f => f.endsWith('.urf.json')).sort((a, b) => a.split('/').pop().localeCompare(b.split('/').pop()));
+    if (!sorted.length) { toast('No .urf.json files found', 'error'); return; }
+    scripts = sorted.map(f => ({path: f, enabled: true}));
+    toast('Running all ' + sorted.length + ' files', 'info');
+  } else {
+    toast('No scripts in sequence and no files available', 'error');
+    return;
+  }
+
+  const forever = document.getElementById('loopRunForever')?.checked || false;
+  const loopCount = forever ? 0 : +(document.getElementById('loopRunCount')?.value || 3);
+  const scriptDelay = +(document.getElementById('seqScriptDelay')?.value || 2);
+  const loopDelay = +(document.getElementById('seqLoopDelay')?.value || 10);
+  const onError = document.getElementById('seqOnError')?.value || 'skip';
+
+  const body = {
+    scripts: scripts,
+    settings: {
+      loop: true,
+      loop_count: loopCount,
+      loop_delay: loopDelay,
+      script_delay: scriptDelay,
+      speed: recording?.settings?.speed || 1.0,
+      on_script_error: onError,
+      replay_mode: 'auto',
+    }
+  };
+
+  const res = await api('POST', '/sequence/play', body);
+  if (res.ok) {
+    seqRunning = true;
+    document.getElementById('btnLoopRun').style.display = 'none';
+    document.getElementById('btnLoopStop').style.display = '';
+    const label = forever ? 'forever' : loopCount + 'x';
+    toast('Loop Run started (' + label + ', ' + scripts.length + ' scripts)', 'success');
+    loopRunPollStatus();
+  } else {
+    toast('Error: ' + (res.error || 'Unknown'), 'error');
+  }
+}
+
+async function loopRunStop() {
+  await api('POST', '/sequence/stop', {});
+  seqRunning = false;
+  document.getElementById('btnLoopRun').style.display = '';
+  document.getElementById('btnLoopStop').style.display = 'none';
+  document.getElementById('loopRunStatus').textContent = '';
+  if (loopRunPollTimer) { clearInterval(loopRunPollTimer); loopRunPollTimer = null; }
+  toast('Loop Run stopped');
+}
+
+function loopRunPollStatus() {
+  if (loopRunPollTimer) clearInterval(loopRunPollTimer);
+  loopRunPollTimer = setInterval(async () => {
+    const st = await api('GET', '/sequence/status');
+    const el = document.getElementById('loopRunStatus');
+    const seqEl = document.getElementById('seqStatus');
+    if (st.status === 'running') {
+      const msg = 'Loop ' + st.current_loop + ' | Script ' + st.current_script_idx + '/' + st.total_scripts + ': ' + (st.current_script_name || '');
+      el.innerHTML = '<span style="color:#a371f7">' + msg + '</span>';
+      if (seqEl) seqEl.innerHTML = '<span style="color:var(--green)">Running</span> | ' + msg;
+    } else {
+      el.textContent = st.status || 'idle';
+      if (seqEl) seqEl.innerHTML = '<span style="color:var(--text2)">' + (st.status || 'idle') + '</span>';
+      if (st.status !== 'running') {
+        seqRunning = false;
+        document.getElementById('btnLoopRun').style.display = '';
+        document.getElementById('btnLoopStop').style.display = 'none';
+        clearInterval(loopRunPollTimer);
+        loopRunPollTimer = null;
+        el.textContent = '';
       }
     }
   }, 1500);
