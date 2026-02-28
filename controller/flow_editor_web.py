@@ -1161,6 +1161,7 @@ let lastHoverAt = 0;
 let webRecording = false;
 let webRecStartTime = 0;
 let webRecFrameCount = 0;
+let _stopInProgress = false;  // guard against double-click on Stop button
 
 // Ctrl+hover inspect state
 let ctrlHeld = false;
@@ -2775,6 +2776,8 @@ function updatePlaybackUI(state, info) {
 
 async function startPlay() {
   if (!recording || !filePath) { toast('No file loaded', 'error'); return; }
+  // Immediately disable Play button to prevent double-click
+  document.getElementById('btnPlay').disabled = true;
   // Save first
   await saveFile();
   try {
@@ -2785,9 +2788,11 @@ async function startPlay() {
       toast('Playback started', 'success');
       startStatusPoll();
     } else {
+      document.getElementById('btnPlay').disabled = false;
       toast('Play failed: ' + (res.error || ''), 'error');
     }
   } catch (e) {
+    document.getElementById('btnPlay').disabled = false;
     toast('Play error: ' + e.message, 'error');
   }
 }
@@ -2805,6 +2810,9 @@ async function startRecord() {
     recording.meta.app_package = p;
     document.getElementById('metaPkg').value = p;
   }
+
+  // Immediately disable Record button to prevent double-click
+  document.getElementById('btnRec').disabled = true;
 
   // Start web recording (accurate JS timing for web clicks)
   webRecording = true;
@@ -2841,6 +2849,16 @@ async function startRecord() {
 }
 
 async function stopPlayback() {
+  // Guard: prevent double-click / concurrent invocations
+  if (_stopInProgress) return;
+  _stopInProgress = true;
+
+  // Immediately disable the Stop button and stop status polling
+  // to prevent race conditions with the poll reloading the file
+  document.getElementById('btnStop').disabled = true;
+  stopStatusPoll();
+  stopElapsedTimer();
+
   const wasWebRecording = webRecording;
   const webFrames = wasWebRecording && recording ? [...recording.frames] : [];
 
@@ -2916,12 +2934,16 @@ async function stopPlayback() {
     if (wasWebRecording && recording && recording.frames.length) {
       await saveFile();
     }
+  } finally {
+    _stopInProgress = false;
   }
 }
 
 function startStatusPoll() {
   stopStatusPoll();
   statusPollTimer = setInterval(async () => {
+    // Skip polling while stopPlayback() is handling its own shutdown sequence
+    if (_stopInProgress) return;
     try {
       const res = await api('GET', '/status');
       if (res.status === 'idle' || res.status === 'stopped') {
