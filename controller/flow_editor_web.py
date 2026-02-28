@@ -433,7 +433,7 @@ input:focus, select:focus, textarea:focus { outline: none; border-color: var(--b
 .topbar h1 { font-size: 15px; font-weight: 600; white-space: nowrap; }
 .topbar .spacer { flex: 1; }
 .main { display: flex; flex: 1; overflow: hidden; }
-.sidebar { width: 280px; background: var(--bg2); border-right: 1px solid var(--border); display: flex; flex-direction: column; flex-shrink: 0; overflow: hidden; }
+.sidebar { width: 280px; background: var(--bg2); border-right: 1px solid var(--border); display: flex; flex-direction: column; flex-shrink: 0; overflow-y: auto; }
 .content { flex: 1; display: flex; flex-direction: column; overflow: hidden; }
 .timeline { flex: 1; overflow-y: auto; padding: 12px; }
 /* detail-panel styles now in .detail-section and .right-panel */
