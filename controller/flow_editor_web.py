@@ -433,9 +433,14 @@ input:focus, select:focus, textarea:focus { outline: none; border-color: var(--b
 .topbar h1 { font-size: 15px; font-weight: 600; white-space: nowrap; }
 .topbar .spacer { flex: 1; }
 .main { display: flex; flex: 1; overflow: hidden; }
-.sidebar { width: 280px; background: var(--bg2); border-right: 1px solid var(--border); display: flex; flex-direction: column; flex-shrink: 0; overflow: hidden; }
+.sidebar { width: 280px; background: var(--bg2); border-right: 1px solid var(--border); display: flex; flex-direction: column; flex-shrink: 0; overflow-y: auto; }
 .content { flex: 1; display: flex; flex-direction: column; overflow: hidden; }
 .timeline { flex: 1; overflow-y: auto; padding: 12px; }
+.bottom-panel { display: flex; border-top: 1px solid var(--border); flex-shrink: 0; max-height: 260px; background: var(--bg2); }
+.bottom-panel > .bp-col { flex: 1; overflow-y: auto; border-right: 1px solid var(--border); min-width: 0; }
+.bottom-panel > .bp-col:last-child { border-right: none; }
+.bottom-panel .sidebar-section { border-bottom: 1px solid var(--border); }
+.bottom-panel .sidebar-section:last-child { border-bottom: none; }
 /* detail-panel styles now in .detail-section and .right-panel */
 
 /* === BUTTONS === */
@@ -928,82 +933,6 @@ input:focus, select:focus, textarea:focus { outline: none; border-color: var(--b
         <div class="setting-row"><label>Max Retries</label><input type="number" min="0" id="setRetries" value="3" onchange="updateSettings()"></div>
       </div>
 
-      <!-- Bulk Actions -->
-      <div class="sidebar-section" data-hover-scope="bulk-actions">
-        <h3>Bulk Actions</h3>
-        <div class="btn-group" style="flex-wrap:wrap;gap:6px">
-          <button class="btn btn-sm" onclick="collapseRaw()" title="Collapse raw touches into gestures">Collapse Raw</button>
-          <button class="btn btn-sm" onclick="compactFrames()" title="Remove disabled frames">Compact</button>
-          <button class="btn btn-sm" onclick="scaleTime()" title="Scale all timing">Scale Time</button>
-          <button class="btn btn-sm" onclick="shiftTime()" title="Shift all timing">Shift Time</button>
-          <button class="btn btn-sm btn-danger" onclick="clearAll()" title="Delete all frames">Clear All</button>
-        </div>
-      </div>
-
-      <!-- Sequence Runner -->
-      <div class="sidebar-section" data-hover-scope="sequence">
-        <h3>Sequence Runner</h3>
-        <div id="seqList" style="max-height:350px;overflow-y:auto;margin-bottom:8px;font-size:12px"></div>
-        <div id="seqFilePicker" style="display:none;margin-bottom:6px"></div>
-        <div class="btn-group" style="flex-wrap:wrap;gap:4px">
-          <button class="btn btn-sm" onclick="seqAddCurrent()" title="Add current file to sequence">+ Current</button>
-          <button class="btn btn-sm" onclick="seqAddFromList()" title="Pick file to add">+ Pick</button>
-          <button class="btn btn-sm" onclick="seqAddAllFiles()" title="Add all files sorted by name">+ All</button>
-          <button class="btn btn-sm btn-danger" onclick="seqClear()" title="Clear sequence" style="font-size:10px">Clear</button>
-        </div>
-        <div style="margin-top:8px">
-          <div class="field-row" style="gap:6px;margin-bottom:4px">
-            <div class="field"><label style="font-size:10px">Loop</label>
-              <select id="seqLoop" style="font-size:11px"><option value="false">No</option><option value="true" selected>Yes</option></select>
-            </div>
-            <div class="field"><label style="font-size:10px">Count</label>
-              <input id="seqLoopCount" type="number" value="0" min="0" style="width:50px;font-size:11px" title="0 = infinite">
-            </div>
-          </div>
-          <div class="field-row" style="gap:6px;margin-bottom:4px">
-            <div class="field"><label style="font-size:10px">Script Delay</label>
-              <input id="seqScriptDelay" type="number" value="2" min="0" step="0.5" style="width:50px;font-size:11px" title="Seconds between scripts">
-            </div>
-            <div class="field"><label style="font-size:10px">Loop Delay</label>
-              <input id="seqLoopDelay" type="number" value="10" min="0" step="1" style="width:50px;font-size:11px" title="Seconds between loops">
-            </div>
-          </div>
-          <div class="field-row" style="gap:6px;margin-bottom:6px">
-            <div class="field"><label style="font-size:10px">On Error</label>
-              <select id="seqOnError" style="font-size:11px"><option value="skip">Skip</option><option value="stop">Stop</option></select>
-            </div>
-          </div>
-        </div>
-        <div class="btn-group" style="gap:6px">
-          <button class="btn btn-sm btn-primary" onclick="seqPlay()" title="Run sequence">&#9654; Run Sequence</button>
-          <button class="btn btn-sm" onclick="seqStop()" title="Stop sequence">&#9632; Stop</button>
-        </div>
-        <div class="btn-group" style="gap:4px;margin-top:4px">
-          <button class="btn btn-sm" onclick="seqSave()" title="Save sequence to .seq.json">Save .seq.json</button>
-          <button class="btn btn-sm" onclick="seqLoad()" title="Load sequence from .seq.json">Load .seq.json</button>
-        </div>
-        <div id="seqStatus" style="font-size:11px;color:var(--text2);margin-top:6px"></div>
-      </div>
-
-      <!-- Station Data Viewer -->
-      <div class="sidebar-section" data-hover-scope="station-data">
-        <h3>Station Data</h3>
-        <div id="extractLogSummary" style="font-size:11px;color:var(--text2);margin-bottom:6px">No extract logs yet</div>
-        <div class="btn-group" style="gap:4px">
-          <button class="btn btn-sm btn-primary" onclick="window.open('/station-data','_blank')" title="Open station data viewer in new tab">Open Data Viewer</button>
-          <button class="btn btn-sm" onclick="refreshExtractLogs()" title="Refresh extract log count">Refresh</button>
-        </div>
-      </div>
-
-      <!-- Station Logs Viewer -->
-      <div class="sidebar-section" data-hover-scope="station-logs">
-        <h3>Station Logs</h3>
-        <div id="stationLogSummary" style="font-size:11px;color:var(--text2);margin-bottom:6px">No playback logs yet</div>
-        <div class="btn-group" style="gap:4px">
-          <button class="btn btn-sm btn-primary" onclick="window.open('/station-logs','_blank')" title="View per-station round-by-round playback logs">Open Log Viewer</button>
-          <button class="btn btn-sm" onclick="refreshStationLogs()" title="Refresh station log count">Refresh</button>
-        </div>
-      </div>
     </div>
 
     <!-- MAIN CONTENT -->
@@ -1029,6 +958,87 @@ input:focus, select:focus, textarea:focus { outline: none; border-color: var(--b
 
       <!-- Timeline -->
       <div class="timeline" id="timeline" data-hover-scope="timeline"></div>
+
+      <!-- Bottom Panel: moved from sidebar for better visibility -->
+      <div class="bottom-panel">
+        <div class="bp-col">
+          <!-- Bulk Actions -->
+          <div class="sidebar-section" data-hover-scope="bulk-actions">
+            <h3>Bulk Actions</h3>
+            <div class="btn-group" style="flex-wrap:wrap;gap:6px">
+              <button class="btn btn-sm" onclick="collapseRaw()" title="Collapse raw touches into gestures">Collapse Raw</button>
+              <button class="btn btn-sm" onclick="compactFrames()" title="Remove disabled frames">Compact</button>
+              <button class="btn btn-sm" onclick="scaleTime()" title="Scale all timing">Scale Time</button>
+              <button class="btn btn-sm" onclick="shiftTime()" title="Shift all timing">Shift Time</button>
+              <button class="btn btn-sm btn-danger" onclick="clearAll()" title="Delete all frames">Clear All</button>
+            </div>
+          </div>
+          <!-- Station Data Viewer -->
+          <div class="sidebar-section" data-hover-scope="station-data">
+            <h3>Station Data</h3>
+            <div id="extractLogSummary" style="font-size:11px;color:var(--text2);margin-bottom:6px">No extract logs yet</div>
+            <div class="btn-group" style="gap:4px">
+              <button class="btn btn-sm btn-primary" onclick="window.open('/station-data','_blank')" title="Open station data viewer in new tab">Open Data Viewer</button>
+              <button class="btn btn-sm" onclick="refreshExtractLogs()" title="Refresh extract log count">Refresh</button>
+            </div>
+          </div>
+          <!-- Station Logs Viewer -->
+          <div class="sidebar-section" data-hover-scope="station-logs">
+            <h3>Station Logs</h3>
+            <div id="stationLogSummary" style="font-size:11px;color:var(--text2);margin-bottom:6px">No playback logs yet</div>
+            <div class="btn-group" style="gap:4px">
+              <button class="btn btn-sm btn-primary" onclick="window.open('/station-logs','_blank')" title="View per-station round-by-round playback logs">Open Log Viewer</button>
+              <button class="btn btn-sm" onclick="refreshStationLogs()" title="Refresh station log count">Refresh</button>
+            </div>
+          </div>
+        </div>
+        <div class="bp-col" style="flex:2">
+          <!-- Sequence Runner -->
+          <div class="sidebar-section" data-hover-scope="sequence">
+            <h3>Sequence Runner</h3>
+            <div id="seqList" style="max-height:150px;overflow-y:auto;margin-bottom:8px;font-size:12px"></div>
+            <div id="seqFilePicker" style="display:none;margin-bottom:6px"></div>
+            <div class="btn-group" style="flex-wrap:wrap;gap:4px">
+              <button class="btn btn-sm" onclick="seqAddCurrent()" title="Add current file to sequence">+ Current</button>
+              <button class="btn btn-sm" onclick="seqAddFromList()" title="Pick file to add">+ Pick</button>
+              <button class="btn btn-sm" onclick="seqAddAllFiles()" title="Add all files sorted by name">+ All</button>
+              <button class="btn btn-sm btn-danger" onclick="seqClear()" title="Clear sequence" style="font-size:10px">Clear</button>
+            </div>
+            <div style="margin-top:8px">
+              <div class="field-row" style="gap:6px;margin-bottom:4px">
+                <div class="field"><label style="font-size:10px">Loop</label>
+                  <select id="seqLoop" style="font-size:11px"><option value="false">No</option><option value="true" selected>Yes</option></select>
+                </div>
+                <div class="field"><label style="font-size:10px">Count</label>
+                  <input id="seqLoopCount" type="number" value="0" min="0" style="width:50px;font-size:11px" title="0 = infinite">
+                </div>
+              </div>
+              <div class="field-row" style="gap:6px;margin-bottom:4px">
+                <div class="field"><label style="font-size:10px">Script Delay</label>
+                  <input id="seqScriptDelay" type="number" value="2" min="0" step="0.5" style="width:50px;font-size:11px" title="Seconds between scripts">
+                </div>
+                <div class="field"><label style="font-size:10px">Loop Delay</label>
+                  <input id="seqLoopDelay" type="number" value="10" min="0" step="1" style="width:50px;font-size:11px" title="Seconds between loops">
+                </div>
+              </div>
+              <div class="field-row" style="gap:6px;margin-bottom:6px">
+                <div class="field"><label style="font-size:10px">On Error</label>
+                  <select id="seqOnError" style="font-size:11px"><option value="skip">Skip</option><option value="stop">Stop</option></select>
+                </div>
+              </div>
+            </div>
+            <div class="btn-group" style="gap:6px">
+              <button class="btn btn-sm btn-primary" onclick="seqPlay()" title="Run sequence">&#9654; Run Sequence</button>
+              <button class="btn btn-sm" onclick="seqStop()" title="Stop sequence">&#9632; Stop</button>
+            </div>
+            <div class="btn-group" style="gap:4px;margin-top:4px">
+              <button class="btn btn-sm" onclick="seqSave()" title="Save sequence to .seq.json">Save .seq.json</button>
+              <button class="btn btn-sm" onclick="seqLoad()" title="Load sequence from .seq.json">Load .seq.json</button>
+            </div>
+            <div id="seqStatus" style="font-size:11px;color:var(--text2);margin-top:6px"></div>
+          </div>
+        </div>
+      </div>
     </div>
 
     <!-- RIGHT PANEL: Device + Detail -->
