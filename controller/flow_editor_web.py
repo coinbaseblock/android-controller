@@ -987,6 +987,20 @@ input:focus, select:focus, textarea:focus { outline: none; border-color: var(--b
           </div>
         </div>
         <div class="bp-col" style="flex:2">
+          <!-- Swipe Controls -->
+          <div class="sidebar-section" data-hover-scope="swipe">
+            <h3>Swipe Controls</h3>
+            <div style="display:flex;gap:4px;flex-wrap:wrap;margin-bottom:6px">
+              <button class="btn btn-sm btn-swipe-dir" onclick="sendSwipe('up')" title="Swipe Up">&#9650; Up</button>
+              <button class="btn btn-sm btn-swipe-dir" onclick="sendSwipe('down')" title="Swipe Down">&#9660; Down</button>
+              <button class="btn btn-sm btn-swipe-dir" onclick="sendSwipe('left')" title="Swipe Left">&#9664; Left</button>
+              <button class="btn btn-sm btn-swipe-dir" onclick="sendSwipe('right')" title="Swipe Right">&#9654; Right</button>
+            </div>
+            <div class="swipe-settings-row" style="border-bottom:none;padding:0">
+              <label>Distance <input type="number" id="swipeDistance" value="500" min="50" max="2000" step="50" title="Swipe distance in device pixels"> px</label>
+              <label>Duration <input type="number" id="swipeDuration" value="300" min="100" max="2000" step="50" title="Swipe duration in ms"> ms</label>
+            </div>
+          </div>
           <!-- Sequence Runner -->
           <div class="sidebar-section" data-hover-scope="sequence">
             <h3>Sequence Runner</h3>
@@ -1081,16 +1095,6 @@ input:focus, select:focus, textarea:focus { outline: none; border-color: var(--b
             <button class="btn btn-sm" onclick="sendKey(66)" title="Enter">Enter</button>
             <button class="btn btn-sm" onclick="rotateScreen()" title="Rotate">Rotate</button>
             <button class="btn btn-sm" onclick="sendKey(224)" title="Wake Up">Wake</button>
-            <span class="ctrl-divider"></span>
-            <button class="btn btn-sm btn-swipe-dir" onclick="sendSwipe('up')" title="Swipe Up">&#9650;</button>
-            <button class="btn btn-sm btn-swipe-dir" onclick="sendSwipe('down')" title="Swipe Down">&#9660;</button>
-            <button class="btn btn-sm btn-swipe-dir" onclick="sendSwipe('left')" title="Swipe Left">&#9664;</button>
-            <button class="btn btn-sm btn-swipe-dir" onclick="sendSwipe('right')" title="Swipe Right">&#9654;</button>
-          </div>
-          <!-- Swipe Settings -->
-          <div class="swipe-settings-row">
-            <label>Distance <input type="number" id="swipeDistance" value="500" min="50" max="2000" step="50" title="Swipe distance in device pixels"> px</label>
-            <label>Duration <input type="number" id="swipeDuration" value="300" min="100" max="2000" step="50" title="Swipe duration in ms"> ms</label>
           </div>
           <div class="device-status" id="deviceStatus">Ready - tap screen to interact</div>
         </div>
