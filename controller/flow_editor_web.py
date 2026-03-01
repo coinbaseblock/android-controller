@@ -775,24 +775,17 @@ input:focus, select:focus, textarea:focus { outline: none; border-color: var(--b
   padding: 6px 10px; display: flex; gap: 4px; flex-wrap: wrap; flex-shrink: 0;
   border-bottom: 1px solid var(--border);
 }
-.swipe-controls {
-  padding: 8px 10px; display: flex; align-items: center; gap: 8px; flex-shrink: 0;
-  border-bottom: 1px solid var(--border);
+.ctrl-divider {
+  width: 1px; height: 18px; background: var(--border); flex-shrink: 0;
 }
-.swipe-dpad {
-  display: grid; grid-template-columns: 36px 36px 36px; grid-template-rows: 36px 36px 36px; gap: 2px;
+.btn-swipe-dir { font-size: 11px; min-width: 28px; padding: 3px 6px; }
+.btn-swipe-dir:active { background: var(--blue) !important; color: #fff !important; transform: scale(0.9); }
+.swipe-settings-row {
+  padding: 4px 10px; display: flex; align-items: center; gap: 10px; flex-shrink: 0;
+  border-bottom: 1px solid var(--border); font-size: 11px; color: var(--text2);
 }
-.swipe-dpad .btn-swipe {
-  width: 36px; height: 36px; border: 1px solid var(--border); border-radius: 4px;
-  background: var(--bg2); color: var(--text); font-size: 16px; cursor: pointer;
-  display: flex; align-items: center; justify-content: center; transition: all .15s; padding: 0;
-}
-.swipe-dpad .btn-swipe:hover { background: var(--bg3); border-color: var(--blue); }
-.swipe-dpad .btn-swipe:active { transform: scale(0.9); background: var(--blue); color: #fff; }
-.swipe-dpad .btn-swipe.placeholder { visibility: hidden; }
-.swipe-settings { display: flex; flex-direction: column; gap: 4px; font-size: 11px; }
-.swipe-settings label { color: var(--text2); }
-.swipe-settings input { width: 64px; }
+.swipe-settings-row label { display: flex; align-items: center; gap: 4px; }
+.swipe-settings-row input { width: 56px; padding: 2px 4px; font-size: 11px; }
 .device-status {
   padding: 5px 12px; font-size: 11px; color: var(--text2);
   text-align: center; flex-shrink: 0; border-top: 1px solid var(--border);
@@ -1088,26 +1081,16 @@ input:focus, select:focus, textarea:focus { outline: none; border-color: var(--b
             <button class="btn btn-sm" onclick="sendKey(66)" title="Enter">Enter</button>
             <button class="btn btn-sm" onclick="rotateScreen()" title="Rotate">Rotate</button>
             <button class="btn btn-sm" onclick="sendKey(224)" title="Wake Up">Wake</button>
+            <span class="ctrl-divider"></span>
+            <button class="btn btn-sm btn-swipe-dir" onclick="sendSwipe('up')" title="Swipe Up">&#9650;</button>
+            <button class="btn btn-sm btn-swipe-dir" onclick="sendSwipe('down')" title="Swipe Down">&#9660;</button>
+            <button class="btn btn-sm btn-swipe-dir" onclick="sendSwipe('left')" title="Swipe Left">&#9664;</button>
+            <button class="btn btn-sm btn-swipe-dir" onclick="sendSwipe('right')" title="Swipe Right">&#9654;</button>
           </div>
-          <!-- Swipe Controls -->
-          <div class="swipe-controls">
-            <div class="swipe-dpad">
-              <div class="btn-swipe placeholder"></div>
-              <button class="btn-swipe" onclick="sendSwipe('up')" title="Swipe Up">&#9650;</button>
-              <div class="btn-swipe placeholder"></div>
-              <button class="btn-swipe" onclick="sendSwipe('left')" title="Swipe Left">&#9664;</button>
-              <div class="btn-swipe placeholder"></div>
-              <button class="btn-swipe" onclick="sendSwipe('right')" title="Swipe Right">&#9654;</button>
-              <div class="btn-swipe placeholder"></div>
-              <button class="btn-swipe" onclick="sendSwipe('down')" title="Swipe Down">&#9660;</button>
-              <div class="btn-swipe placeholder"></div>
-            </div>
-            <div class="swipe-settings">
-              <label>Distance (px)</label>
-              <input type="number" id="swipeDistance" value="500" min="50" max="2000" step="50" title="Swipe distance in device pixels">
-              <label>Duration (ms)</label>
-              <input type="number" id="swipeDuration" value="300" min="100" max="2000" step="50" title="Swipe duration in ms">
-            </div>
+          <!-- Swipe Settings -->
+          <div class="swipe-settings-row">
+            <label>Distance <input type="number" id="swipeDistance" value="500" min="50" max="2000" step="50" title="Swipe distance in device pixels"> px</label>
+            <label>Duration <input type="number" id="swipeDuration" value="300" min="100" max="2000" step="50" title="Swipe duration in ms"> ms</label>
           </div>
           <div class="device-status" id="deviceStatus">Ready - tap screen to interact</div>
         </div>
