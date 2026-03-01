@@ -987,6 +987,16 @@ input:focus, select:focus, textarea:focus { outline: none; border-color: var(--b
           </div>
         </div>
         <div class="bp-col" style="flex:2">
+          <!-- Navigation Bar -->
+          <div class="sidebar-section" data-hover-scope="navigation">
+            <h3>Navigation</h3>
+            <div class="nav-bar" style="margin:0">
+              <button class="nav-btn" onclick="sendKey(4)" title="Back">&#9665;</button>
+              <button class="nav-btn" onclick="sendKey(3)" title="Home">&#9711;</button>
+              <button class="nav-btn" onclick="sendKey(187)" title="Recent Apps">&#9634;</button>
+              <button class="nav-btn" onclick="sendKey(26)" title="Power" style="font-size:14px">&#9211;</button>
+            </div>
+          </div>
           <!-- Device Controls: Text Input + Extra Keys -->
           <div class="sidebar-section" data-hover-scope="device-controls">
             <h3>Device Controls</h3>
@@ -1090,13 +1100,6 @@ input:focus, select:focus, textarea:focus { outline: none; border-color: var(--b
             <div class="no-screen" id="noScreen">Connecting to device...</div>
             <img id="screenImg" style="display:none" alt="Device Screen">
             <div id="elementOverlays" style="position:absolute;top:0;left:0;width:100%;height:100%;pointer-events:none"></div>
-          </div>
-          <!-- Navigation Bar -->
-          <div class="nav-bar">
-            <button class="nav-btn" onclick="sendKey(4)" title="Back">&#9665;</button>
-            <button class="nav-btn" onclick="sendKey(3)" title="Home">&#9711;</button>
-            <button class="nav-btn" onclick="sendKey(187)" title="Recent Apps">&#9634;</button>
-            <button class="nav-btn" onclick="sendKey(26)" title="Power" style="font-size:14px">&#9211;</button>
           </div>
           <div class="device-status" id="deviceStatus">Ready - tap screen to interact</div>
         </div>
