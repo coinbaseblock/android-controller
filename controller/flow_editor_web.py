@@ -813,6 +813,60 @@ input:focus, select:focus, textarea:focus { outline: none; border-color: var(--b
 /* Detail tab */
 .detail-section { display: flex; flex-direction: column; flex: 1; overflow-y: auto; }
 /* btn-realtime-on removed - device panel is always visible */
+
+/* === DEBUG FRAME OVERLAY === */
+.btn-debug {
+  padding: 3px 8px; font-size: 11px; font-weight: 600; border-radius: 4px;
+  border: 1px solid var(--border); background: var(--bg3); color: var(--text2);
+  cursor: pointer; transition: all .2s; display: inline-flex; align-items: center; gap: 4px;
+}
+.btn-debug:hover { border-color: var(--orange); color: var(--orange); }
+.btn-debug.active {
+  background: rgba(210,153,34,0.2); border-color: var(--orange); color: var(--orange);
+  box-shadow: 0 0 6px rgba(210,153,34,0.3);
+}
+.btn-debug .debug-dot {
+  width: 6px; height: 6px; border-radius: 50%; background: var(--text2); transition: all .2s;
+}
+.btn-debug.active .debug-dot {
+  background: var(--orange); box-shadow: 0 0 4px var(--orange);
+  animation: debug-blink 1.5s ease-in-out infinite;
+}
+@keyframes debug-blink {
+  0%, 100% { opacity: 1; } 50% { opacity: 0.4; }
+}
+.debug-overlay-rect {
+  position: absolute; pointer-events: none; z-index: 8;
+  border-radius: 2px; transition: opacity .15s;
+}
+.debug-overlay-rect.clickable {
+  border: 1.5px solid rgba(63,185,80,0.7);
+  background: rgba(63,185,80,0.06);
+}
+.debug-overlay-rect.has-id {
+  border: 1.5px solid rgba(88,166,255,0.7);
+  background: rgba(88,166,255,0.06);
+}
+.debug-overlay-rect.other {
+  border: 1px solid rgba(139,148,158,0.4);
+  background: rgba(139,148,158,0.03);
+}
+.debug-overlay-rect .debug-el-label {
+  position: absolute; top: -1px; left: 0; font-size: 7px; line-height: 1.3;
+  padding: 0 3px; white-space: nowrap; max-width: 100%; overflow: hidden;
+  text-overflow: ellipsis; pointer-events: none; font-weight: 600;
+}
+.debug-overlay-rect.clickable .debug-el-label { background: rgba(63,185,80,0.85); color: #000; }
+.debug-overlay-rect.has-id .debug-el-label { background: rgba(88,166,255,0.85); color: #000; }
+.debug-overlay-rect.other .debug-el-label { background: rgba(139,148,158,0.6); color: #000; }
+.debug-count-badge {
+  font-size: 9px; padding: 0 5px; border-radius: 8px; font-weight: 700;
+  background: var(--border); color: var(--text2); margin-left: 2px;
+  transition: all .2s;
+}
+.btn-debug.active .debug-count-badge {
+  background: rgba(210,153,34,0.3); color: var(--orange);
+}
 </style>
 </head>
 <body>
@@ -1090,6 +1144,9 @@ input:focus, select:focus, textarea:focus { outline: none; border-color: var(--b
           <div class="device-header">
             <h3>Screen</h3>
             <div class="device-controls">
+              <button class="btn-debug" id="btnDebugFrames" onclick="toggleDebugFrames()" title="Toggle debug bounding box overlay on all UI elements">
+                <span class="debug-dot"></span> Debug <span class="debug-count-badge" id="debugCountBadge" style="display:none">0</span>
+              </button>
               <label style="font-size:11px;display:flex;align-items:center;gap:4px">
                 <input type="checkbox" id="autoRefresh" checked style="width:auto"> Auto
               </label>
@@ -1099,6 +1156,7 @@ input:focus, select:focus, textarea:focus { outline: none; border-color: var(--b
           <div class="screen-container" id="screenContainer">
             <div class="no-screen" id="noScreen">Connecting to device...</div>
             <img id="screenImg" style="display:none" alt="Device Screen">
+            <div id="debugOverlays" style="position:absolute;top:0;left:0;width:100%;height:100%;pointer-events:none;display:none"></div>
             <div id="elementOverlays" style="position:absolute;top:0;left:0;width:100%;height:100%;pointer-events:none"></div>
           </div>
           <div class="device-status" id="deviceStatus">Ready - tap screen to interact</div>
@@ -2947,6 +3005,103 @@ function switchRightTab(tabName, btn) {
 }
 
 // ============================================================
+// DEBUG FRAME OVERLAY
+// ============================================================
+let debugFramesEnabled = false;
+let debugElementsCache = [];
+
+function toggleDebugFrames() {
+  debugFramesEnabled = !debugFramesEnabled;
+  const btn = document.getElementById('btnDebugFrames');
+  const overlay = document.getElementById('debugOverlays');
+  btn.classList.toggle('active', debugFramesEnabled);
+  overlay.style.display = debugFramesEnabled ? 'block' : 'none';
+  if (debugFramesEnabled) {
+    // Fetch elements immediately when toggled on
+    fetchDebugElements();
+  } else {
+    overlay.innerHTML = '';
+    const badge = document.getElementById('debugCountBadge');
+    badge.style.display = 'none';
+  }
+}
+
+async function fetchDebugElements() {
+  if (!debugFramesEnabled) return;
+  try {
+    const resp = await fetch('/api/elements');
+    const data = await resp.json();
+    debugElementsCache = data.elements || [];
+    renderDebugOverlays(debugElementsCache);
+  } catch (e) {
+    console.error('Debug elements fetch error:', e);
+  }
+}
+
+function renderDebugOverlays(elements) {
+  const container = document.getElementById('debugOverlays');
+  const img = document.getElementById('screenImg');
+  container.innerHTML = '';
+
+  if (!screenNaturalW || !screenNaturalH || !elements.length) {
+    document.getElementById('debugCountBadge').style.display = 'none';
+    return;
+  }
+
+  const displayW = img.clientWidth;
+  const displayH = img.clientHeight;
+  const scaleX = displayW / screenNaturalW;
+  const scaleY = displayH / screenNaturalH;
+
+  let visibleCount = 0;
+
+  elements.forEach((el) => {
+    const b = el.bounds;
+    if (!b || b.length < 4) return;
+    const [x1, y1, x2, y2] = b;
+    const w = x2 - x1;
+    const h = y2 - y1;
+    if (w <= 0 || h <= 0) return;
+    // Skip full-screen containers
+    if (w >= screenNaturalW * 0.95 && h >= screenNaturalH * 0.95) return;
+
+    const div = document.createElement('div');
+    div.className = 'debug-overlay-rect';
+
+    // Classify the element for color coding
+    if (el.clickable) {
+      div.classList.add('clickable');
+    } else if (el.resource_id || el.text) {
+      div.classList.add('has-id');
+    } else {
+      div.classList.add('other');
+    }
+
+    div.style.left = (x1 * scaleX) + 'px';
+    div.style.top = (y1 * scaleY) + 'px';
+    div.style.width = (w * scaleX) + 'px';
+    div.style.height = (h * scaleY) + 'px';
+
+    // Show label for elements with meaningful identity
+    const label = el.text || (el.resource_id || '').split('/').pop() || '';
+    if (label && (h * scaleY) > 8) {
+      const lbl = document.createElement('span');
+      lbl.className = 'debug-el-label';
+      lbl.textContent = label.length > 20 ? label.slice(0, 20) + '...' : label;
+      div.appendChild(lbl);
+    }
+
+    container.appendChild(div);
+    visibleCount++;
+  });
+
+  // Update badge count
+  const badge = document.getElementById('debugCountBadge');
+  badge.textContent = visibleCount;
+  badge.style.display = visibleCount > 0 ? 'inline' : 'none';
+}
+
+// ============================================================
 // DEVICE SCREEN & CONTROLS
 // ============================================================
 let screenElements = [];
@@ -2991,6 +3146,10 @@ async function captureScreen() {
       noScreen.style.display = 'none';
       img.style.display = 'block';
       URL.revokeObjectURL(url);
+      // Refresh debug overlays if enabled
+      if (debugFramesEnabled) {
+        fetchDebugElements();
+      }
     };
     img.src = url;
     status.textContent = 'Screen updated | ' + new Date().toLocaleTimeString();
@@ -3026,12 +3185,20 @@ async function captureScreenWithElements() {
       noScreen.style.display = 'none';
       img.style.display = 'block';
       renderElementOverlays(elData.elements || []);
+      // Also refresh debug overlays with same data
+      if (debugFramesEnabled) {
+        renderDebugOverlays(elData.elements || []);
+      }
       URL.revokeObjectURL(url);
     };
     img.src = url;
 
     screenElements = elData.elements || [];
     renderElementList(screenElements);
+    // Update debug cache if debug is on
+    if (debugFramesEnabled) {
+      debugElementsCache = screenElements;
+    }
 
     const count = screenElements.length;
     const clickable = screenElements.filter(e => e.clickable || e.text || e.resource_id).length;
