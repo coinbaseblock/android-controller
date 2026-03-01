@@ -987,6 +987,25 @@ input:focus, select:focus, textarea:focus { outline: none; border-color: var(--b
           </div>
         </div>
         <div class="bp-col" style="flex:2">
+          <!-- Device Controls -->
+          <div class="sidebar-section" data-hover-scope="device-controls">
+            <h3>Device Controls</h3>
+            <!-- Text Input -->
+            <div style="display:flex;gap:4px;margin-bottom:6px">
+              <input type="text" id="textInput" placeholder="Type text and press Enter..." style="flex:1;padding:4px 8px;font-size:12px;border:1px solid var(--border);border-radius:4px;background:var(--bg);color:var(--text)" onkeydown="if(event.key==='Enter'){sendText();event.preventDefault();}">
+              <button class="btn btn-sm" onclick="sendText()">Send</button>
+            </div>
+            <!-- Extra Controls -->
+            <div style="display:flex;gap:4px;flex-wrap:wrap">
+              <button class="btn btn-sm" onclick="sendKey(24)" title="Volume Up">Vol+</button>
+              <button class="btn btn-sm" onclick="sendKey(25)" title="Volume Down">Vol-</button>
+              <button class="btn btn-sm" onclick="sendKey(67)" title="Delete/Backspace">Del</button>
+              <button class="btn btn-sm" onclick="sendKey(61)" title="Tab">Tab</button>
+              <button class="btn btn-sm" onclick="sendKey(66)" title="Enter">Enter</button>
+              <button class="btn btn-sm" onclick="rotateScreen()" title="Rotate">Rotate</button>
+              <button class="btn btn-sm" onclick="sendKey(224)" title="Wake Up">Wake</button>
+            </div>
+          </div>
           <!-- Swipe Controls -->
           <div class="sidebar-section" data-hover-scope="swipe">
             <h3>Swipe Controls</h3>
@@ -1074,27 +1093,12 @@ input:focus, select:focus, textarea:focus { outline: none; border-color: var(--b
             <img id="screenImg" style="display:none" alt="Device Screen">
             <div id="elementOverlays" style="position:absolute;top:0;left:0;width:100%;height:100%;pointer-events:none"></div>
           </div>
-          <!-- Navigation Bar -->
+          <!-- Navigation Bar (minimal) -->
           <div class="nav-bar">
             <button class="nav-btn" onclick="sendKey(4)" title="Back">&#9665;</button>
             <button class="nav-btn" onclick="sendKey(3)" title="Home">&#9711;</button>
             <button class="nav-btn" onclick="sendKey(187)" title="Recent Apps">&#9634;</button>
             <button class="nav-btn" onclick="sendKey(26)" title="Power" style="font-size:14px">&#9211;</button>
-          </div>
-          <!-- Text Input -->
-          <div class="quick-controls">
-            <input type="text" id="textInput" placeholder="Type text and press Enter..." onkeydown="if(event.key==='Enter'){sendText();event.preventDefault();}">
-            <button class="btn btn-sm" onclick="sendText()">Send</button>
-          </div>
-          <!-- Extra Controls -->
-          <div class="extra-controls">
-            <button class="btn btn-sm" onclick="sendKey(24)" title="Volume Up">Vol+</button>
-            <button class="btn btn-sm" onclick="sendKey(25)" title="Volume Down">Vol-</button>
-            <button class="btn btn-sm" onclick="sendKey(67)" title="Delete/Backspace">Del</button>
-            <button class="btn btn-sm" onclick="sendKey(61)" title="Tab">Tab</button>
-            <button class="btn btn-sm" onclick="sendKey(66)" title="Enter">Enter</button>
-            <button class="btn btn-sm" onclick="rotateScreen()" title="Rotate">Rotate</button>
-            <button class="btn btn-sm" onclick="sendKey(224)" title="Wake Up">Wake</button>
           </div>
           <div class="device-status" id="deviceStatus">Ready - tap screen to interact</div>
         </div>
