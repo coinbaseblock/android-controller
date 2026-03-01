@@ -436,7 +436,7 @@ input:focus, select:focus, textarea:focus { outline: none; border-color: var(--b
 .sidebar { width: 280px; background: var(--bg2); border-right: 1px solid var(--border); display: flex; flex-direction: column; flex-shrink: 0; overflow-y: auto; }
 .content { flex: 1; display: flex; flex-direction: column; overflow: hidden; }
 .timeline { flex: 1; overflow-y: auto; padding: 12px; }
-.bottom-panel { display: flex; border-top: 2px solid var(--blue); flex-shrink: 0; min-height: 120px; max-height: 280px; background: var(--bg2); }
+.bottom-panel { display: flex; border-top: 2px solid var(--blue); flex-shrink: 0; min-height: 120px; max-height: 320px; background: var(--bg2); }
 .bottom-panel > .bp-col { flex: 1; overflow-y: auto; border-right: 1px solid var(--border); min-width: 0; }
 .bottom-panel > .bp-col:last-child { border-right: none; }
 .bottom-panel .sidebar-section { border-bottom: 1px solid var(--border); padding: 10px 12px; }
@@ -1040,7 +1040,7 @@ input:focus, select:focus, textarea:focus { outline: none; border-color: var(--b
             </div>
           </div>
         </div>
-        <div class="bp-col" style="flex:2">
+        <div class="bp-col" style="flex:1.5">
           <!-- Navigation Bar -->
           <div class="sidebar-section" data-hover-scope="navigation">
             <h3>Navigation</h3>
@@ -1051,7 +1051,7 @@ input:focus, select:focus, textarea:focus { outline: none; border-color: var(--b
               <button class="nav-btn" onclick="sendKey(26)" title="Power" style="font-size:14px">&#9211;</button>
             </div>
           </div>
-          <!-- Device Controls: Text Input + Extra Keys -->
+          <!-- Device Controls: Text Input + Extra Keys + Swipe -->
           <div class="sidebar-section" data-hover-scope="device-controls">
             <h3>Device Controls</h3>
             <div class="quick-controls" style="margin-bottom:6px">
@@ -1066,22 +1066,19 @@ input:focus, select:focus, textarea:focus { outline: none; border-color: var(--b
               <button class="btn btn-sm" onclick="sendKey(66)" title="Enter">Enter</button>
               <button class="btn btn-sm" onclick="rotateScreen()" title="Rotate">Rotate</button>
               <button class="btn btn-sm" onclick="sendKey(224)" title="Wake Up">Wake</button>
-            </div>
-          </div>
-          <!-- Swipe Controls -->
-          <div class="sidebar-section" data-hover-scope="swipe">
-            <h3>Swipe Controls</h3>
-            <div style="display:flex;gap:4px;flex-wrap:wrap;margin-bottom:6px">
-              <button class="btn btn-sm btn-swipe-dir" onclick="sendSwipe('up')" title="Swipe Up">&#9650; Up</button>
-              <button class="btn btn-sm btn-swipe-dir" onclick="sendSwipe('down')" title="Swipe Down">&#9660; Down</button>
-              <button class="btn btn-sm btn-swipe-dir" onclick="sendSwipe('left')" title="Swipe Left">&#9664; Left</button>
-              <button class="btn btn-sm btn-swipe-dir" onclick="sendSwipe('right')" title="Swipe Right">&#9654; Right</button>
+              <span class="ctrl-divider"></span>
+              <button class="btn btn-sm btn-swipe-dir" onclick="sendSwipe('up')" title="Swipe Up">&#9650;</button>
+              <button class="btn btn-sm btn-swipe-dir" onclick="sendSwipe('down')" title="Swipe Down">&#9660;</button>
+              <button class="btn btn-sm btn-swipe-dir" onclick="sendSwipe('left')" title="Swipe Left">&#9664;</button>
+              <button class="btn btn-sm btn-swipe-dir" onclick="sendSwipe('right')" title="Swipe Right">&#9654;</button>
             </div>
             <div class="swipe-settings-row" style="border-bottom:none;padding:0">
-              <label>Distance <input type="number" id="swipeDistance" value="500" min="50" max="2000" step="50" title="Swipe distance in device pixels"> px</label>
-              <label>Duration <input type="number" id="swipeDuration" value="300" min="100" max="2000" step="50" title="Swipe duration in ms"> ms</label>
+              <label>Dist <input type="number" id="swipeDistance" value="500" min="50" max="2000" step="50" title="Swipe distance in device pixels"> px</label>
+              <label>Dur <input type="number" id="swipeDuration" value="300" min="100" max="2000" step="50" title="Swipe duration in ms"> ms</label>
             </div>
           </div>
+        </div>
+        <div class="bp-col" style="flex:1.2">
           <!-- Sequence Runner -->
           <div class="sidebar-section" data-hover-scope="sequence">
             <h3>Sequence Runner</h3>
