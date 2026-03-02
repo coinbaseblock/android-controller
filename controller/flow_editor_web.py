@@ -1095,8 +1095,10 @@ input:focus, select:focus, textarea:focus { outline: none; border-color: var(--b
             <div id="diskSpaceBar" style="height:6px;background:#21262d;border-radius:3px;overflow:hidden;margin-bottom:6px">
               <div id="diskSpaceUsed" style="height:100%;background:var(--green);border-radius:3px;transition:width .3s"></div>
             </div>
+            <div id="diskBreakdown" style="font-size:10px;color:var(--text2);margin-bottom:6px;display:none"></div>
             <div class="btn-group" style="gap:4px">
               <button class="btn btn-sm" onclick="refreshDiskSpace()" title="Refresh disk space info">Refresh</button>
+              <button class="btn btn-sm btn-danger" onclick="deepClean()" title="Deep clean: remove captures, sent images, logs, cache, temp files">Deep Clean</button>
             </div>
           </div>
           <!-- Station Data Viewer -->
@@ -2757,6 +2759,7 @@ async function refreshDiskSpace() {
     const data = await api('GET', '/disk-space');
     const el = document.getElementById('diskSpaceInfo');
     const bar = document.getElementById('diskSpaceUsed');
+    const bd = document.getElementById('diskBreakdown');
     if (!data.ok) { el.textContent = 'Error: ' + (data.error || 'unknown'); return; }
     const pct = data.used_pct;
     const color = pct > 90 ? 'var(--red)' : pct > 75 ? '#d29922' : 'var(--green)';
@@ -2766,10 +2769,55 @@ async function refreshDiskSpace() {
       '<span style="color:' + color + '">' + pct + '%</span>) | ' +
       'Free: <strong>' + data.free_gb + ' GB</strong>' +
       (data.log_count > 0 ? ' | Logs: <strong>' + data.log_size_mb + ' MB</strong> (' + data.log_count + ' files)' : '');
+    // Show breakdown if available
+    if (data.breakdown) {
+      const b = data.breakdown;
+      const parts = [];
+      if (b.captures_count > 0) parts.push('Captures: ' + b.captures_mb + ' MB (' + b.captures_count + ')');
+      if (b.sent_count > 0) parts.push('Sent: ' + b.sent_mb + ' MB (' + b.sent_count + ')');
+      if (b.img_total_count > 0) parts.push('Img total: ' + b.img_total_mb + ' MB');
+      if (b.urf_count > 0) parts.push('Recordings: ' + b.urf_mb + ' MB (' + b.urf_count + ')');
+      if (b.pycache_count > 0) parts.push('Cache: ' + b.pycache_mb + ' MB');
+      if (b.tmp_count > 0) parts.push('Temp: ' + b.tmp_mb + ' MB');
+      if (parts.length > 0) {
+        bd.innerHTML = parts.join(' | ');
+        bd.style.display = '';
+      } else {
+        bd.style.display = 'none';
+      }
+    }
   } catch (e) { /* ignore */ }
 }
 setTimeout(() => refreshDiskSpace(), 1500);
 setInterval(() => refreshDiskSpace(), 60000);
+
+async function deepClean() {
+  if (!confirm('Deep Clean: Delete ALL captures, sent images, logs, cache, and temp files?\\nThis will free maximum disk space but cannot be undone.')) return;
+  try {
+    toast('Deep cleaning...', 'info');
+    const res = await api('POST', '/deep-clean', {});
+    if (res.ok) {
+      let msg = 'Deep clean complete! Deleted ' + res.deleted + ' files, freed ' + res.freed_mb + ' MB';
+      if (res.details) {
+        const d = res.details;
+        const parts = [];
+        if (d.logs > 0) parts.push(d.logs + ' logs');
+        if (d.captures > 0) parts.push(d.captures + ' captures');
+        if (d.sent > 0) parts.push(d.sent + ' sent imgs');
+        if (d.pycache > 0) parts.push(d.pycache + ' cache');
+        if (d.tmp > 0) parts.push(d.tmp + ' temp');
+        if (d.system_cache > 0) parts.push(d.system_cache + ' sys cache');
+        if (parts.length > 0) msg += ' (' + parts.join(', ') + ')';
+      }
+      toast(msg, 'success');
+    } else {
+      toast('Deep clean error: ' + (res.error || 'unknown'), 'error');
+    }
+    refreshExtractLogs();
+    refreshStationLogs();
+    refreshDiskSpace();
+  } catch (e) { toast('Error: ' + e.message, 'error'); }
+}
 
 // ============================================================
 // LOG MANAGEMENT: DELETE / DOWNLOAD / CLEAR
@@ -4962,6 +5010,8 @@ class EditorHandler(BaseHTTPRequestHandler):
             self._json(self._delete_all_station_logs())
         elif path == "/api/clear-all-logs":
             self._json(self._clear_all_logs())
+        elif path == "/api/deep-clean":
+            self._json(self._deep_clean())
         elif path == "/api/delete-log":
             self._json(self._delete_single_log(body))
         else:
@@ -5663,18 +5713,68 @@ class EditorHandler(BaseHTTPRequestHandler):
 
     # -------- Disk Space endpoint --------
 
+    @staticmethod
+    def _dir_size(path: Path) -> tuple:
+        """Return (total_bytes, file_count) for a directory."""
+        total = 0
+        count = 0
+        if path.exists():
+            for f in path.rglob("*"):
+                if f.is_file():
+                    try:
+                        total += f.stat().st_size
+                        count += 1
+                    except OSError:
+                        pass
+        return total, count
+
     def _disk_space(self) -> dict:
-        """Return disk usage info for the work directory."""
+        """Return disk usage info for the work directory with detailed breakdown."""
         try:
             usage = shutil.disk_usage(self.work_dir)
             log_dir = Path(self.work_dir) / "logs"
-            log_size = 0
-            log_count = 0
-            if log_dir.exists():
-                for f in log_dir.iterdir():
-                    if f.is_file():
-                        log_size += f.stat().st_size
-                        log_count += 1
+            log_size, log_count = self._dir_size(log_dir)
+
+            # Breakdown: captures, sent images, work data files, __pycache__
+            captures_dir = Path("/img/captures")
+            sent_dir = Path("/img/sent")
+            img_dir = Path("/img")
+            pycache_size = 0
+            pycache_count = 0
+            for d in [Path(self.work_dir), Path("/usr/local/bin")]:
+                for pc in d.rglob("__pycache__"):
+                    if pc.is_dir():
+                        s, c = self._dir_size(pc)
+                        pycache_size += s
+                        pycache_count += c
+
+            captures_size, captures_count = self._dir_size(captures_dir)
+            sent_size, sent_count = self._dir_size(sent_dir)
+            img_size, img_count = self._dir_size(img_dir)
+
+            # Work dir .urf.json files
+            urf_size = 0
+            urf_count = 0
+            work = Path(self.work_dir)
+            if work.exists():
+                for f in work.glob("*.urf.json"):
+                    try:
+                        urf_size += f.stat().st_size
+                        urf_count += 1
+                    except OSError:
+                        pass
+
+            # Temp files in work dir
+            tmp_size = 0
+            tmp_count = 0
+            for pattern in ["*.tmp", "*.bak", "*.pyc", ".tmp_*"]:
+                for f in work.glob(pattern):
+                    try:
+                        tmp_size += f.stat().st_size
+                        tmp_count += 1
+                    except OSError:
+                        pass
+
             return {
                 "ok": True,
                 "total_gb": round(usage.total / (1024**3), 2),
@@ -5683,9 +5783,129 @@ class EditorHandler(BaseHTTPRequestHandler):
                 "used_pct": round(usage.used / usage.total * 100, 1),
                 "log_size_mb": round(log_size / (1024**2), 2),
                 "log_count": log_count,
+                "breakdown": {
+                    "captures_mb": round(captures_size / (1024**2), 2),
+                    "captures_count": captures_count,
+                    "sent_mb": round(sent_size / (1024**2), 2),
+                    "sent_count": sent_count,
+                    "img_total_mb": round(img_size / (1024**2), 2),
+                    "img_total_count": img_count,
+                    "urf_mb": round(urf_size / (1024**2), 2),
+                    "urf_count": urf_count,
+                    "pycache_mb": round(pycache_size / (1024**2), 2),
+                    "pycache_count": pycache_count,
+                    "tmp_mb": round(tmp_size / (1024**2), 2),
+                    "tmp_count": tmp_count,
+                },
             }
         except Exception as e:
             return {"ok": False, "error": str(e)}
+
+    def _deep_clean(self) -> dict:
+        """Aggressively clean disk space: logs, captures, sent images, temp files, __pycache__."""
+        deleted = 0
+        freed = 0
+        errors = []
+        details = {}
+
+        # 1. Clear all log files
+        log_dir = Path(self.work_dir) / "logs"
+        log_del = 0
+        if log_dir.exists():
+            for p in log_dir.iterdir():
+                if p.is_file():
+                    try:
+                        freed += p.stat().st_size
+                        p.unlink()
+                        deleted += 1
+                        log_del += 1
+                    except Exception as e:
+                        errors.append(f"log {p.name}: {e}")
+        details["logs"] = log_del
+
+        # 2. Clear /img/captures
+        cap_dir = Path("/img/captures")
+        cap_del = 0
+        if cap_dir.exists():
+            for p in cap_dir.rglob("*"):
+                if p.is_file():
+                    try:
+                        freed += p.stat().st_size
+                        p.unlink()
+                        deleted += 1
+                        cap_del += 1
+                    except Exception as e:
+                        errors.append(f"capture {p.name}: {e}")
+        details["captures"] = cap_del
+
+        # 3. Clear /img/sent
+        sent_dir = Path("/img/sent")
+        sent_del = 0
+        if sent_dir.exists():
+            for p in sent_dir.rglob("*"):
+                if p.is_file():
+                    try:
+                        freed += p.stat().st_size
+                        p.unlink()
+                        deleted += 1
+                        sent_del += 1
+                    except Exception as e:
+                        errors.append(f"sent {p.name}: {e}")
+        details["sent"] = sent_del
+
+        # 4. Clear __pycache__ directories
+        pc_del = 0
+        for d in [Path(self.work_dir), Path("/usr/local/bin")]:
+            for pc in list(d.rglob("__pycache__")):
+                if pc.is_dir():
+                    try:
+                        for f in pc.rglob("*"):
+                            if f.is_file():
+                                freed += f.stat().st_size
+                                f.unlink()
+                                deleted += 1
+                                pc_del += 1
+                        shutil.rmtree(pc, ignore_errors=True)
+                    except Exception as e:
+                        errors.append(f"pycache: {e}")
+        details["pycache"] = pc_del
+
+        # 5. Clear temp files in work dir
+        tmp_del = 0
+        work = Path(self.work_dir)
+        for pattern in ["*.tmp", "*.bak", "*.pyc", ".tmp_*"]:
+            for f in work.glob(pattern):
+                try:
+                    freed += f.stat().st_size
+                    f.unlink()
+                    deleted += 1
+                    tmp_del += 1
+                except Exception as e:
+                    errors.append(f"tmp {f.name}: {e}")
+        details["tmp"] = tmp_del
+
+        # 6. Clean apt cache and other system temp files
+        sys_del = 0
+        for sys_dir in [Path("/var/cache/apt"), Path("/tmp"), Path("/var/tmp")]:
+            if sys_dir.exists():
+                for p in sys_dir.rglob("*"):
+                    if p.is_file():
+                        try:
+                            freed += p.stat().st_size
+                            p.unlink()
+                            deleted += 1
+                            sys_del += 1
+                        except Exception:
+                            pass
+        details["system_cache"] = sys_del
+
+        return {
+            "ok": True,
+            "deleted": deleted,
+            "freed_mb": round(freed / (1024**2), 2),
+            "details": details,
+            "errors": errors[:10],
+        }
 
     # -------- Delete / Clear Log endpoints --------
 
