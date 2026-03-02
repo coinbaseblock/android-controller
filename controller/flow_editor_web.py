@@ -490,6 +490,9 @@ input:focus, select:focus, textarea:focus { outline: none; border-color: var(--b
 .frame-card:hover { border-color: var(--text2); }
 .frame-card.selected { border-color: var(--blue); box-shadow: 0 0 0 1px var(--blue); }
 .frame-card.disabled { opacity: .4; }
+.frame-card.playing { border-color: #f0e68c; box-shadow: 0 0 0 2px #f0e68c88, 0 0 12px #f0e68c44; background: #f0e68c10; }
+@keyframes playingPulse { 0%,100% { box-shadow: 0 0 0 2px #f0e68c88, 0 0 12px #f0e68c44; } 50% { box-shadow: 0 0 0 2px #f0e68ccc, 0 0 18px #f0e68c66; } }
+.frame-card.playing { animation: playingPulse 1.5s ease-in-out infinite; }
 .frame-card.dragging { opacity: .5; border-style: dashed; }
 .frame-type-bar { width: 4px; border-radius: 6px 0 0 6px; flex-shrink: 0; }
 .type-touch { background: var(--orange); }
@@ -2757,6 +2760,33 @@ function stopElapsedTimer() {
   if (elapsedTimer) { clearInterval(elapsedTimer); elapsedTimer = null; }
 }
 
+let _lastPlayingFrameId = -1;
+function highlightPlayingFrame(currentStep) {
+  // Map current_step (1-based, enabled-only) to a frame id
+  let targetId = -1;
+  if (recording && currentStep > 0) {
+    const enabledFrames = recording.frames.filter(f => f.enabled !== false);
+    const idx = currentStep - 1;
+    if (idx >= 0 && idx < enabledFrames.length) {
+      targetId = enabledFrames[idx].id;
+    }
+  }
+  if (targetId === _lastPlayingFrameId) return;
+  _lastPlayingFrameId = targetId;
+
+  // Remove previous highlight
+  document.querySelectorAll('.frame-card.playing').forEach(el => el.classList.remove('playing'));
+
+  if (targetId < 0) return;
+
+  // Add highlight to current frame
+  const card = document.querySelector(`.frame-card[data-id="${targetId}"]`);
+  if (card) {
+    card.classList.add('playing');
+    card.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+  }
+}
+
 function updatePlaybackUI(state, info) {
   playbackState = state;
   const btnPlay = document.getElementById('btnPlay');
@@ -2785,6 +2815,7 @@ function updatePlaybackUI(state, info) {
     progressContainer.style.display = 'none';
     timerEl.style.display = 'none';
     stepInfo.textContent = '';
+    highlightPlayingFrame(-1);
     stopStatusPoll();
     stopElapsedTimer();
   } else if (state === 'playing') {
@@ -2801,6 +2832,7 @@ function updatePlaybackUI(state, info) {
       const pct = info.total_steps > 0 ? (info.current_step / info.total_steps * 100) : 0;
       progressBar.style.width = pct + '%';
       stepInfo.textContent = info.current_step + '/' + info.total_steps;
+      highlightPlayingFrame(info.current_step);
     }
   } else if (state === 'recording') {
     btnRec.classList.add('active');
@@ -2827,6 +2859,7 @@ function updatePlaybackUI(state, info) {
     progressContainer.style.display = 'none';
     timerEl.style.display = 'none';
     stepInfo.textContent = info?.message || '';
+    highlightPlayingFrame(-1);
     stopStatusPoll();
     stopElapsedTimer();
   }
