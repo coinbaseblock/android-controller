@@ -27,15 +27,18 @@ Features:
 
 from __future__ import annotations
 
+import io
 import json
 import os
 import re as _re
+import shutil
 import signal
 import subprocess
 import sys
 import threading
 import time
 import argparse
+import zipfile
 from datetime import datetime
 import xml.etree.ElementTree as _ET
 from http.server import HTTPServer, BaseHTTPRequestHandler
@@ -1085,22 +1088,45 @@ input:focus, select:focus, textarea:focus { outline: none; border-color: var(--b
               <button class="btn btn-sm btn-danger" onclick="clearAll()" title="Delete all frames">Clear All</button>
             </div>
           </div>
+          <!-- Disk Space -->
+          <div class="sidebar-section" data-hover-scope="disk-space">
+            <h3>Disk Space</h3>
+            <div id="diskSpaceInfo" style="font-size:11px;color:var(--text2);margin-bottom:6px">Loading...</div>
+            <div id="diskSpaceBar" style="height:6px;background:#21262d;border-radius:3px;overflow:hidden;margin-bottom:6px">
+              <div id="diskSpaceUsed" style="height:100%;background:var(--green);border-radius:3px;transition:width .3s"></div>
+            </div>
+            <div class="btn-group" style="gap:4px">
+              <button class="btn btn-sm" onclick="refreshDiskSpace()" title="Refresh disk space info">Refresh</button>
+            </div>
+          </div>
           <!-- Station Data Viewer -->
           <div class="sidebar-section" data-hover-scope="station-data">
             <h3>Station Data</h3>
             <div id="extractLogSummary" style="font-size:11px;color:var(--text2);margin-bottom:6px">No extract logs yet</div>
-            <div class="btn-group" style="gap:4px">
+            <div class="btn-group" style="gap:4px;flex-wrap:wrap">
               <button class="btn btn-sm btn-primary" onclick="window.open('/station-data','_blank')" title="Open station data viewer in new tab">Open Data Viewer</button>
               <button class="btn btn-sm" onclick="refreshExtractLogs()" title="Refresh extract log count">Refresh</button>
+              <button class="btn btn-sm" onclick="downloadExtractLogs()" title="Download all extract logs as ZIP">Download</button>
+              <button class="btn btn-sm btn-danger" onclick="deleteAllExtractLogs()" title="Delete all extract log files">Delete All</button>
             </div>
           </div>
           <!-- Station Logs Viewer -->
           <div class="sidebar-section" data-hover-scope="station-logs">
             <h3>Station Logs</h3>
             <div id="stationLogSummary" style="font-size:11px;color:var(--text2);margin-bottom:6px">No playback logs yet</div>
-            <div class="btn-group" style="gap:4px">
+            <div class="btn-group" style="gap:4px;flex-wrap:wrap">
               <button class="btn btn-sm btn-primary" onclick="window.open('/station-logs','_blank')" title="View per-station round-by-round playback logs">Open Log Viewer</button>
               <button class="btn btn-sm" onclick="refreshStationLogs()" title="Refresh station log count">Refresh</button>
+              <button class="btn btn-sm" onclick="downloadStationLogs()" title="Download all station logs as ZIP">Download</button>
+              <button class="btn btn-sm btn-danger" onclick="deleteAllStationLogs()" title="Delete all station log files">Delete All</button>
+            </div>
+          </div>
+          <!-- Log Management -->
+          <div class="sidebar-section" data-hover-scope="log-management">
+            <h3>Log Management</h3>
+            <div class="btn-group" style="gap:4px;flex-wrap:wrap">
+              <button class="btn btn-sm btn-primary" onclick="downloadAllLogs()" title="Download ALL logs (extract + station) as ZIP">Download All Logs</button>
+              <button class="btn btn-sm btn-danger" onclick="clearAllLogs()" title="Delete ALL log files to free up space">Clear All Logs</button>
             </div>
           </div>
         </div>
@@ -2724,6 +2750,74 @@ setTimeout(() => refreshStationLogs(), 2500);
 setInterval(() => refreshStationLogs(), 30000);
 
 // ============================================================
+// DISK SPACE
+// ============================================================
+async function refreshDiskSpace() {
+  try {
+    const data = await api('GET', '/disk-space');
+    const el = document.getElementById('diskSpaceInfo');
+    const bar = document.getElementById('diskSpaceUsed');
+    if (!data.ok) { el.textContent = 'Error: ' + (data.error || 'unknown'); return; }
+    const pct = data.used_pct;
+    const color = pct > 90 ? 'var(--red)' : pct > 75 ? '#d29922' : 'var(--green)';
+    bar.style.width = pct + '%';
+    bar.style.background = color;
+    el.innerHTML = '<strong>' + data.used_gb + '</strong> / ' + data.total_gb + ' GB used (' +
+      '<span style="color:' + color + '">' + pct + '%</span>) | ' +
+      'Free: <strong>' + data.free_gb + ' GB</strong>' +
+      (data.log_count > 0 ? ' | Logs: <strong>' + data.log_size_mb + ' MB</strong> (' + data.log_count + ' files)' : '');
+  } catch (e) { /* ignore */ }
+}
+setTimeout(() => refreshDiskSpace(), 1500);
+setInterval(() => refreshDiskSpace(), 60000);
+
+// ============================================================
+// LOG MANAGEMENT: DELETE / DOWNLOAD / CLEAR
+// ============================================================
+async function deleteAllExtractLogs() {
+  if (!confirm('Delete ALL extract log files? This cannot be undone.')) return;
+  try {
+    const res = await api('POST', '/delete-all-extract-logs', {});
+    toast('Deleted ' + (res.deleted || 0) + ' extract log files', 'success');
+    refreshExtractLogs();
+    refreshDiskSpace();
+  } catch (e) { toast('Error: ' + e.message, 'error'); }
+}
+
+async function deleteAllStationLogs() {
+  if (!confirm('Delete ALL station playback log files? This cannot be undone.')) return;
+  try {
+    const res = await api('POST', '/delete-all-station-logs', {});
+    toast('Deleted ' + (res.deleted || 0) + ' station log files', 'success');
+    refreshStationLogs();
+    refreshDiskSpace();
+  } catch (e) { toast('Error: ' + e.message, 'error'); }
+}
+
+async function clearAllLogs() {
+  if (!confirm('Delete ALL log files (extract + station + all others)? This will free up disk space but cannot be undone.')) return;
+  try {
+    const res = await api('POST', '/clear-all-logs', {});
+    toast('Cleared ' + (res.deleted || 0) + ' log files', 'success');
+    refreshExtractLogs();
+    refreshStationLogs();
+    refreshDiskSpace();
+  } catch (e) { toast('Error: ' + e.message, 'error'); }
+}
+
+function downloadExtractLogs() {
+  window.open('/api/download-extract-logs', '_blank');
+}
+
+function downloadStationLogs() {
+  window.open('/api/download-station-logs', '_blank');
+}
+
+function downloadAllLogs() {
+  window.open('/api/download-all-logs', '_blank');
+}
+
+// ============================================================
 // DRAG & DROP
 // ============================================================
 function onDragStart(e, idx) { dragSrcIdx = idx; e.currentTarget.classList.add('dragging'); e.dataTransfer.effectAllowed = 'move'; }
@@ -4127,6 +4221,11 @@ body{font-family:'Segoe UI',system-ui,sans-serif;background:#0f1117;color:#e1e4e
     <input type="checkbox" id="autoRefresh" checked>
     <label for="autoRefresh">Auto-refresh (10s)</label>
   </div>
+  <span style="border-left:1px solid #30363d;height:20px"></span>
+  <button onclick="downloadCurrentLog()" title="Download currently selected log file">Download Selected</button>
+  <button onclick="window.open('/api/download-extract-logs','_blank')" title="Download all extract logs as ZIP">Download All ZIP</button>
+  <button onclick="deleteCurrentLog()" style="background:#3d1f1f;border-color:#f8514966" title="Delete currently selected log file">Delete Selected</button>
+  <button onclick="deleteAllExtractLogs()" style="background:#3d1f1f;border-color:#f8514966" title="Delete ALL extract log files">Delete All</button>
 </div>
 
 <div class="container">
@@ -4311,6 +4410,42 @@ function stopAutoRefresh() {
 }
 document.getElementById('autoRefresh').addEventListener('change', startAutoRefresh);
 
+// Download & Delete functions
+async function apiPost(path, body) {
+  const res = await fetch('/api' + path, {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body || {})});
+  return res.json();
+}
+
+function downloadCurrentLog() {
+  if (!currentLogPath) { alert('No log file selected'); return; }
+  window.open('/api/download-log?path=' + encodeURIComponent(currentLogPath), '_blank');
+}
+
+async function deleteCurrentLog() {
+  if (!currentLogPath) { alert('No log file selected'); return; }
+  if (!confirm('Delete this log file?\n' + currentLogPath.split('/').pop())) return;
+  try {
+    await apiPost('/delete-log', {path: currentLogPath});
+    currentLogPath = '';
+    document.getElementById('viewerTitle').textContent = 'Select a log file';
+    document.getElementById('viewerCount').textContent = '';
+    document.getElementById('viewerEntries').innerHTML = '<div class="empty">Log file deleted</div>';
+    loadLogs();
+  } catch(e) { alert('Error: ' + e.message); }
+}
+
+async function deleteAllExtractLogs() {
+  if (!confirm('Delete ALL extract log files? This cannot be undone.')) return;
+  try {
+    const res = await apiPost('/delete-all-extract-logs', {});
+    alert('Deleted ' + (res.deleted || 0) + ' extract log files');
+    currentLogPath = '';
+    document.getElementById('viewerTitle').textContent = 'Select a log file';
+    document.getElementById('viewerEntries').innerHTML = '<div class="empty">All logs deleted</div>';
+    loadLogs();
+  } catch(e) { alert('Error: ' + e.message); }
+}
+
 // Init
 loadLogs();
 startAutoRefresh();
@@ -4427,6 +4562,11 @@ body{font-family:'Segoe UI',system-ui,sans-serif;background:#0f1117;color:#e1e4e
     <input type="checkbox" id="autoRefresh" checked>
     <label for="autoRefresh">Auto-refresh (10s)</label>
   </div>
+  <span style="border-left:1px solid #30363d;height:20px"></span>
+  <button onclick="downloadCurrentStationLog()" title="Download currently selected station log">Download Selected</button>
+  <button onclick="window.open('/api/download-station-logs','_blank')" title="Download all station logs as ZIP">Download All ZIP</button>
+  <button onclick="deleteCurrentStationLog()" style="background:#3d1f1f;border-color:#f8514966" title="Delete currently selected station log">Delete Selected</button>
+  <button onclick="deleteAllStationLogs()" style="background:#3d1f1f;border-color:#f8514966" title="Delete ALL station log files">Delete All</button>
 </div>
 
 <div class="container">
@@ -4669,6 +4809,44 @@ function stopAutoRefresh() {
 }
 document.getElementById('autoRefresh').addEventListener('change', startAutoRefresh);
 
+// Download & Delete functions
+async function apiPost(path, body) {
+  const res = await fetch('/api' + path, {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body || {})});
+  return res.json();
+}
+
+function downloadCurrentStationLog() {
+  if (!currentLogPath) { alert('No station log selected'); return; }
+  window.open('/api/download-log?path=' + encodeURIComponent(currentLogPath), '_blank');
+}
+
+async function deleteCurrentStationLog() {
+  if (!currentLogPath) { alert('No station log selected'); return; }
+  if (!confirm('Delete this station log?\n' + currentLogPath.split('/').pop())) return;
+  try {
+    await apiPost('/delete-log', {path: currentLogPath});
+    currentLogPath = '';
+    currentLogData = null;
+    document.getElementById('viewerTitle').textContent = 'Select a station';
+    document.getElementById('viewerMeta').textContent = '';
+    document.getElementById('runList').innerHTML = '<div class="empty">Log file deleted</div>';
+    loadStationLogs();
+  } catch(e) { alert('Error: ' + e.message); }
+}
+
+async function deleteAllStationLogs() {
+  if (!confirm('Delete ALL station playback log files? This cannot be undone.')) return;
+  try {
+    const res = await apiPost('/delete-all-station-logs', {});
+    alert('Deleted ' + (res.deleted || 0) + ' station log files');
+    currentLogPath = '';
+    currentLogData = null;
+    document.getElementById('viewerTitle').textContent = 'Select a station';
+    document.getElementById('runList').innerHTML = '<div class="empty">All station logs deleted</div>';
+    loadStationLogs();
+  } catch(e) { alert('Error: ' + e.message); }
+}
+
 // Init
 loadStationLogs();
 startAutoRefresh();
@@ -4726,6 +4904,16 @@ class EditorHandler(BaseHTTPRequestHandler):
         elif path == "/api/station-log":
             fp = params.get("path", [""])[0]
             self._json(self._read_station_log(fp))
+        elif path == "/api/disk-space":
+            self._json(self._disk_space())
+        elif path == "/api/download-log":
+            self._download_single_log(params)
+        elif path == "/api/download-all-logs":
+            self._download_all_logs_zip()
+        elif path == "/api/download-extract-logs":
+            self._download_extract_logs_zip()
+        elif path == "/api/download-station-logs":
+            self._download_station_logs_zip()
         else:
             self._error(404, "Not Found")
 
@@ -4768,6 +4956,14 @@ class EditorHandler(BaseHTTPRequestHandler):
             self._json(self._delete_file(body))
         elif path == "/api/extract-save":
             self._json(self._save_extract_data(body))
+        elif path == "/api/delete-all-extract-logs":
+            self._json(self._delete_all_extract_logs())
+        elif path == "/api/delete-all-station-logs":
+            self._json(self._delete_all_station_logs())
+        elif path == "/api/clear-all-logs":
+            self._json(self._clear_all_logs())
+        elif path == "/api/delete-log":
+            self._json(self._delete_single_log(body))
         else:
             self._error(404, "Not Found")
 
@@ -5464,6 +5660,201 @@ class EditorHandler(BaseHTTPRequestHandler):
             return data
         except Exception as e:
             return {"error": str(e)}
+
+    # -------- Disk Space endpoint --------
+
+    def _disk_space(self) -> dict:
+        """Return disk usage info for the work directory."""
+        try:
+            usage = shutil.disk_usage(self.work_dir)
+            log_dir = Path(self.work_dir) / "logs"
+            log_size = 0
+            log_count = 0
+            if log_dir.exists():
+                for f in log_dir.iterdir():
+                    if f.is_file():
+                        log_size += f.stat().st_size
+                        log_count += 1
+            return {
+                "ok": True,
+                "total_gb": round(usage.total / (1024**3), 2),
+                "used_gb": round(usage.used / (1024**3), 2),
+                "free_gb": round(usage.free / (1024**3), 2),
+                "used_pct": round(usage.used / usage.total * 100, 1),
+                "log_size_mb": round(log_size / (1024**2), 2),
+                "log_count": log_count,
+            }
+        except Exception as e:
+            return {"ok": False, "error": str(e)}
+
+    # -------- Delete / Clear Log endpoints --------
+
+    def _delete_all_extract_logs(self) -> dict:
+        """Delete all extract JSONL log files."""
+        log_dir = Path(self.work_dir) / "logs"
+        deleted = 0
+        errors = []
+        if log_dir.exists():
+            for p in list(log_dir.glob("*-extract.jsonl")) + list(log_dir.glob("extract-*.jsonl")):
+                try:
+                    p.unlink()
+                    deleted += 1
+                except Exception as e:
+                    errors.append(f"{p.name}: {e}")
+        return {"ok": True, "deleted": deleted, "errors": errors}
+
+    def _delete_all_station_logs(self) -> dict:
+        """Delete all station playback JSON log files."""
+        log_dir = Path(self.work_dir) / "logs"
+        deleted = 0
+        errors = []
+        if log_dir.exists():
+            for p in list(log_dir.glob("station-*-playback.json")):
+                try:
+                    p.unlink()
+                    deleted += 1
+                except Exception as e:
+                    errors.append(f"{p.name}: {e}")
+        return {"ok": True, "deleted": deleted, "errors": errors}
+
+    def _clear_all_logs(self) -> dict:
+        """Delete ALL log files (extract + station + any other logs)."""
+        log_dir = Path(self.work_dir) / "logs"
+        deleted = 0
+        errors = []
+        if log_dir.exists():
+            for p in log_dir.iterdir():
+                if p.is_file():
+                    try:
+                        p.unlink()
+                        deleted += 1
+                    except Exception as e:
+                        errors.append(f"{p.name}: {e}")
+        return {"ok": True, "deleted": deleted, "errors": errors}
+
+    def _delete_single_log(self, body: dict) -> dict:
+        """Delete a single log file by path."""
+        path = body.get("path", "")
+        if not path:
+            return {"error": "No path specified"}
+        p = Path(path)
+        if not p.exists():
+            return {"error": f"File not found: {path}"}
+        try:
+            p.resolve().relative_to(Path(self.work_dir).resolve())
+        except ValueError:
+            return {"error": "Cannot delete files outside work directory"}
+        try:
+            p.unlink()
+            return {"ok": True}
+        except Exception as e:
+            return {"error": str(e)}
+
+    # -------- Download Log endpoints --------
+
+    def _download_single_log(self, params: dict) -> None:
+        """Download a single log file."""
+        path = params.get("path", [""])[0]
+        if not path:
+            self._json({"error": "No path specified"})
+            return
+        p = Path(path)
+        if not p.exists():
+            self._json({"error": f"File not found: {path}"})
+            return
+        try:
+            p.resolve().relative_to(Path(self.work_dir).resolve())
+        except ValueError:
+            self._json({"error": "Cannot download files outside work directory"})
+            return
+        try:
+            data = p.read_bytes()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/octet-stream")
+            self.send_header("Content-Disposition", f'attachment; filename="{p.name}"')
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
+        except Exception as e:
+            self._json({"error": str(e)})
+
+    def _download_all_logs_zip(self) -> None:
+        """Download all log files as a single ZIP archive."""
+        log_dir = Path(self.work_dir) / "logs"
+        if not log_dir.exists() or not any(log_dir.iterdir()):
+            self._json({"error": "No log files found"})
+            return
+        try:
+            buf = io.BytesIO()
+            with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+                for p in sorted(log_dir.iterdir()):
+                    if p.is_file():
+                        zf.write(p, p.name)
+            data = buf.getvalue()
+            ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+            filename = f"logs_{ts}.zip"
+            self.send_response(200)
+            self.send_header("Content-Type", "application/zip")
+            self.send_header("Content-Disposition", f'attachment; filename="{filename}"')
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
+        except Exception as e:
+            self._json({"error": str(e)})
+
+    def _download_extract_logs_zip(self) -> None:
+        """Download only extract log files as ZIP."""
+        log_dir = Path(self.work_dir) / "logs"
+        try:
+            buf = io.BytesIO()
+            count = 0
+            with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+                if log_dir.exists():
+                    for p in sorted(list(log_dir.glob("*-extract.jsonl")) + list(log_dir.glob("extract-*.jsonl"))):
+                        if p.is_file():
+                            zf.write(p, p.name)
+                            count += 1
+            if count == 0:
+                self._json({"error": "No extract log files found"})
+                return
+            data = buf.getvalue()
+            ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+            filename = f"extract_logs_{ts}.zip"
+            self.send_response(200)
+            self.send_header("Content-Type", "application/zip")
+            self.send_header("Content-Disposition", f'attachment; filename="{filename}"')
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
+        except Exception as e:
+            self._json({"error": str(e)})
+
+    def _download_station_logs_zip(self) -> None:
+        """Download only station playback log files as ZIP."""
+        log_dir = Path(self.work_dir) / "logs"
+        try:
+            buf = io.BytesIO()
+            count = 0
+            with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+                if log_dir.exists():
+                    for p in sorted(log_dir.glob("station-*-playback.json")):
+                        if p.is_file():
+                            zf.write(p, p.name)
+                            count += 1
+            if count == 0:
+                self._json({"error": "No station log files found"})
+                return
+            data = buf.getvalue()
+            ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+            filename = f"station_logs_{ts}.zip"
+            self.send_response(200)
+            self.send_header("Content-Type", "application/zip")
+            self.send_header("Content-Disposition", f'attachment; filename="{filename}"')
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
+        except Exception as e:
+            self._json({"error": str(e)})
 
     # -------- Sequence Runner endpoints --------
 
