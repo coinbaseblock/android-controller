@@ -840,28 +840,89 @@ input:focus, select:focus, textarea:focus { outline: none; border-color: var(--b
 }
 .debug-overlay-rect {
   position: absolute; pointer-events: none; z-index: 8;
-  border-radius: 2px; transition: opacity .15s;
+  border-radius: 4px; transition: opacity .15s;
 }
 .debug-overlay-rect.clickable {
-  border: 1.5px solid rgba(63,185,80,0.7);
-  background: rgba(63,185,80,0.06);
+  border: 2px solid rgba(63,185,80,0.85);
+  background: rgba(63,185,80,0.08);
+  box-shadow: 0 0 0 1px rgba(63,185,80,0.15), inset 0 0 8px rgba(63,185,80,0.05);
+}
+.debug-overlay-rect.has-text {
+  border: 2px solid rgba(210,153,34,0.85);
+  background: rgba(210,153,34,0.08);
+  box-shadow: 0 0 0 1px rgba(210,153,34,0.15), inset 0 0 8px rgba(210,153,34,0.05);
 }
 .debug-overlay-rect.has-id {
-  border: 1.5px solid rgba(88,166,255,0.7);
-  background: rgba(88,166,255,0.06);
+  border: 2px solid rgba(88,166,255,0.85);
+  background: rgba(88,166,255,0.08);
+  box-shadow: 0 0 0 1px rgba(88,166,255,0.15), inset 0 0 8px rgba(88,166,255,0.05);
 }
 .debug-overlay-rect.other {
-  border: 1px solid rgba(139,148,158,0.4);
+  border: 1px dashed rgba(139,148,158,0.4);
   background: rgba(139,148,158,0.03);
 }
-.debug-overlay-rect .debug-el-label {
-  position: absolute; top: -1px; left: 0; font-size: 7px; line-height: 1.3;
-  padding: 0 3px; white-space: nowrap; max-width: 100%; overflow: hidden;
-  text-overflow: ellipsis; pointer-events: none; font-weight: 600;
+/* Card-style label header */
+.debug-overlay-rect .debug-card-header {
+  position: absolute; top: -1px; left: -1px; right: -1px;
+  display: flex; align-items: center; gap: 3px;
+  padding: 1px 4px; font-size: 7px; line-height: 1.4;
+  border-radius: 3px 3px 0 0; pointer-events: none;
+  white-space: nowrap; overflow: hidden;
 }
-.debug-overlay-rect.clickable .debug-el-label { background: rgba(63,185,80,0.85); color: #000; }
-.debug-overlay-rect.has-id .debug-el-label { background: rgba(88,166,255,0.85); color: #000; }
-.debug-overlay-rect.other .debug-el-label { background: rgba(139,148,158,0.6); color: #000; }
+.debug-overlay-rect.clickable .debug-card-header {
+  background: rgba(63,185,80,0.9); color: #000;
+}
+.debug-overlay-rect.has-text .debug-card-header {
+  background: rgba(210,153,34,0.9); color: #000;
+}
+.debug-overlay-rect.has-id .debug-card-header {
+  background: rgba(88,166,255,0.9); color: #000;
+}
+.debug-overlay-rect.other .debug-card-header {
+  background: rgba(139,148,158,0.6); color: #000;
+}
+/* Index badge */
+.debug-card-header .debug-idx {
+  display: inline-flex; align-items: center; justify-content: center;
+  min-width: 12px; height: 12px; border-radius: 6px;
+  background: rgba(0,0,0,0.3); color: #fff; font-size: 7px;
+  font-weight: 700; padding: 0 2px; flex-shrink: 0;
+}
+/* Class/type tag */
+.debug-card-header .debug-cls {
+  font-weight: 700; text-overflow: ellipsis; overflow: hidden; flex-shrink: 0; max-width: 70px;
+}
+/* Text/ID info */
+.debug-card-header .debug-info {
+  font-weight: 400; opacity: 0.85; text-overflow: ellipsis; overflow: hidden; flex: 1;
+}
+/* Bottom info bar (bounds/center) */
+.debug-overlay-rect .debug-card-footer {
+  position: absolute; bottom: -1px; left: -1px; right: -1px;
+  padding: 0 4px; font-size: 6px; line-height: 1.5;
+  border-radius: 0 0 3px 3px; pointer-events: none;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  font-family: 'Consolas', monospace; opacity: 0.8;
+}
+.debug-overlay-rect.clickable .debug-card-footer { background: rgba(63,185,80,0.7); color: #000; }
+.debug-overlay-rect.has-text .debug-card-footer { background: rgba(210,153,34,0.7); color: #000; }
+.debug-overlay-rect.has-id .debug-card-footer { background: rgba(88,166,255,0.7); color: #000; }
+.debug-overlay-rect.other .debug-card-footer { background: rgba(139,148,158,0.4); color: #000; }
+/* Legend bar */
+.debug-legend {
+  position: absolute; bottom: 4px; left: 4px; display: flex; gap: 6px;
+  padding: 3px 8px; background: rgba(13,17,23,0.85); border-radius: 6px;
+  border: 1px solid rgba(48,54,61,0.8); z-index: 12; pointer-events: none;
+  font-size: 9px; color: #e1e4e8; backdrop-filter: blur(4px);
+}
+.debug-legend-item { display: flex; align-items: center; gap: 3px; }
+.debug-legend-dot {
+  width: 8px; height: 8px; border-radius: 2px; border: 1.5px solid;
+}
+.debug-legend-dot.lg-click { border-color: #3fb950; background: rgba(63,185,80,0.2); }
+.debug-legend-dot.lg-text { border-color: #d29922; background: rgba(210,153,34,0.2); }
+.debug-legend-dot.lg-id { border-color: #58a6ff; background: rgba(88,166,255,0.2); }
+.debug-legend-dot.lg-other { border-color: #8b949e; background: rgba(139,148,158,0.2); }
 .debug-count-badge {
   font-size: 9px; padding: 0 5px; border-radius: 8px; font-weight: 700;
   background: var(--border); color: var(--text2); margin-left: 2px;
@@ -3084,6 +3145,7 @@ function renderDebugOverlays(elements) {
   const scaleY = displayH / screenNaturalH;
 
   let visibleCount = 0;
+  let clickCount = 0, textCount = 0, idCount = 0, otherCount = 0;
 
   elements.forEach((el) => {
     const b = el.bounds;
@@ -3095,16 +3157,20 @@ function renderDebugOverlays(elements) {
     // Skip full-screen containers
     if (w >= screenNaturalW * 0.95 && h >= screenNaturalH * 0.95) return;
 
+    visibleCount++;
     const div = document.createElement('div');
     div.className = 'debug-overlay-rect';
 
-    // Classify the element for color coding
+    // Classify element: clickable > has-text > has-id > other
+    let category;
     if (el.clickable) {
-      div.classList.add('clickable');
-    } else if (el.resource_id || el.text) {
-      div.classList.add('has-id');
+      div.classList.add('clickable'); category = 'click'; clickCount++;
+    } else if (el.text && el.text.trim()) {
+      div.classList.add('has-text'); category = 'text'; textCount++;
+    } else if (el.resource_id) {
+      div.classList.add('has-id'); category = 'id'; idCount++;
     } else {
-      div.classList.add('other');
+      div.classList.add('other'); category = 'other'; otherCount++;
     }
 
     div.style.left = (x1 * scaleX) + 'px';
@@ -3112,18 +3178,70 @@ function renderDebugOverlays(elements) {
     div.style.width = (w * scaleX) + 'px';
     div.style.height = (h * scaleY) + 'px';
 
-    // Show label for elements with meaningful identity
-    const label = el.text || (el.resource_id || '').split('/').pop() || '';
-    if (label && (h * scaleY) > 8) {
-      const lbl = document.createElement('span');
-      lbl.className = 'debug-el-label';
-      lbl.textContent = label.length > 20 ? label.slice(0, 20) + '...' : label;
-      div.appendChild(lbl);
+    const scaledH = h * scaleY;
+    const scaledW = w * scaleX;
+
+    // Card header: [idx] ClassName | text/id
+    if (scaledH > 10 && scaledW > 20) {
+      const header = document.createElement('div');
+      header.className = 'debug-card-header';
+
+      // Index badge
+      const idx = document.createElement('span');
+      idx.className = 'debug-idx';
+      idx.textContent = visibleCount;
+      header.appendChild(idx);
+
+      // Short class name
+      const clsName = (el.cls || '').split('.').pop() || '';
+      if (clsName) {
+        const cls = document.createElement('span');
+        cls.className = 'debug-cls';
+        cls.textContent = clsName;
+        header.appendChild(cls);
+      }
+
+      // Text or resource_id info
+      const infoText = el.text ? ('"' + (el.text.length > 15 ? el.text.slice(0, 15) + '..' : el.text) + '"')
+        : el.resource_id ? el.resource_id.split('/').pop() : '';
+      if (infoText) {
+        const info = document.createElement('span');
+        info.className = 'debug-info';
+        info.textContent = infoText;
+        header.appendChild(info);
+      }
+
+      div.appendChild(header);
+    }
+
+    // Card footer: bounds info (only for elements tall enough)
+    if (scaledH > 20 && scaledW > 40 && category !== 'other') {
+      const footer = document.createElement('div');
+      footer.className = 'debug-card-footer';
+      footer.textContent = '[' + x1 + ',' + y1 + '][' + x2 + ',' + y2 + ']';
+      div.appendChild(footer);
     }
 
     container.appendChild(div);
-    visibleCount++;
   });
+
+  // Add legend bar
+  const legend = document.createElement('div');
+  legend.className = 'debug-legend';
+  const legendItems = [
+    { cls: 'lg-click', label: 'Clickable', count: clickCount },
+    { cls: 'lg-text', label: 'Text', count: textCount },
+    { cls: 'lg-id', label: 'ID', count: idCount },
+    { cls: 'lg-other', label: 'Other', count: otherCount },
+  ];
+  legendItems.forEach(item => {
+    if (item.count === 0) return;
+    const li = document.createElement('span');
+    li.className = 'debug-legend-item';
+    li.innerHTML = '<span class="debug-legend-dot ' + item.cls + '"></span>' + item.label + ' ' + item.count;
+    legend.appendChild(li);
+  });
+  container.appendChild(legend);
 
   // Update badge count
   const badge = document.getElementById('debugCountBadge');
@@ -3637,6 +3755,23 @@ async function captureCtrlFrame() {
       }
       renderTimeline();
 
+      // Flash debug overlays to show captured elements (auto-hide after 3s)
+      if (debugFramesEnabled) {
+        debugElementsCache = elData.elements;
+        renderDebugOverlays(elData.elements);
+      } else {
+        // Temporarily show captured frames even if debug is off
+        const overlay = document.getElementById('debugOverlays');
+        overlay.style.display = 'block';
+        renderDebugOverlays(elData.elements);
+        setTimeout(() => {
+          if (!debugFramesEnabled) {
+            overlay.style.display = 'none';
+            overlay.innerHTML = '';
+          }
+        }, 3000);
+      }
+
       // Save to JSON log file immediately (append)
       try {
         const saveRes = await api('POST', '/extract-save', {
@@ -3873,6 +4008,14 @@ loadFileList();
 
 // Initialize screen touch interaction
 initScreenTouch();
+
+// Re-render debug overlays on container resize
+const _screenResizeObs = new ResizeObserver(() => {
+  if (debugFramesEnabled && debugElementsCache.length) {
+    renderDebugOverlays(debugElementsCache);
+  }
+});
+_screenResizeObs.observe(document.getElementById('screenContainer'));
 
 // Start auto-refresh for device screen
 startScreenRefresh();
