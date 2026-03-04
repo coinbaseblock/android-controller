@@ -5116,18 +5116,20 @@ function render(data) {
     return;
   }
 
-  // Summary
+  // Summary – count unique loops and max connectors across all rounds
   let totalConnectors = 0, totalRounds = 0;
   stations.forEach(s => {
     totalRounds += s.rounds.length;
-    if (s.rounds.length) totalConnectors = Math.max(totalConnectors, s.rounds[0].connectors.length);
+    s.rounds.forEach(r => {
+      totalConnectors = Math.max(totalConnectors, r.connectors.length);
+    });
   });
 
   summaryEl.innerHTML = `
     <div class="summary-grid">
       <div class="summary-card"><div class="num">${stations.length}</div><div class="label">Station(s)</div></div>
-      <div class="summary-card"><div class="num">${totalRounds}</div><div class="label">Capture Rounds</div></div>
-      <div class="summary-card"><div class="num">${totalConnectors}</div><div class="label">Connectors</div></div>
+      <div class="summary-card"><div class="num">${totalRounds}</div><div class="label">Capture Loop(s)</div></div>
+      <div class="summary-card"><div class="num">${totalConnectors}</div><div class="label">Max Connectors</div></div>
     </div>`;
 
   // Build station cards
@@ -5157,20 +5159,23 @@ function render(data) {
       chargerGroups[cid].push(k);
     }
 
-    // Deduplicate rounds (same timestamp should not appear twice)
-    const seenTs = new Set();
+    // Rounds are already grouped by loop on the server side.
+    // Deduplicate by loop number (safety net for edge cases).
+    const seenLoop = new Set();
     const uniqueRounds = rounds.filter(r => {
-      if (seenTs.has(r.timestamp)) return false;
-      seenTs.add(r.timestamp);
+      const key = r.loop || r.timestamp;
+      if (seenLoop.has(key)) return false;
+      seenLoop.add(key);
       return true;
     });
 
-    // Round columns
+    // Round columns – use the actual loop number from data
     const roundCols = uniqueRounds.map((r, i) => `
       <th class="round-col">
-        <div class="round-header">รอบ ${i+1}</div>
+        <div class="round-header">รอบ ${r.loop || (i+1)}</div>
         <div class="round-time">${fmtTime(r.timestamp)}</div>
         <div class="round-time" style="color:#6e7681">${fmtDate(r.timestamp)}</div>
+        <div class="round-time" style="color:#484f58">${r.connectors.length} หัวจ่าย</div>
       </th>`).join('');
 
     // Build round status lookups
@@ -5974,8 +5979,14 @@ class EditorHandler(BaseHTTPRequestHandler):
         Reads all JSONL extract logs, finds entries that contain charger data
         (identified by the presence of 'รหัสเครื่องชาร์จ' in all_text), parses
         the connector statuses spatially, and returns data grouped by station
-        and recording round.
+        and **capture loop** (not per-entry).
+
+        During capture the screen is scrolled, so a single loop may produce
+        multiple extract entries – some with charger data, some without.  We
+        merge all connector data within the same (station, loop) into one
+        round so the view shows exactly one column per actual loop pass.
         """
+        # Intermediate: stations -> { name -> { meta, loop_data -> { loop -> merged_round } } }
         stations: dict = {}
         seen_entries: set = set()
 
@@ -6023,29 +6034,66 @@ class EditorHandler(BaseHTTPRequestHandler):
                                 station_name = "Unknown Station"
 
                             connectors = self._cv_parse_connectors(all_text, charger_ids)
+                            # Skip entries that parsed zero connectors (empty scroll captures)
+                            if not connectors:
+                                continue
+
+                            loop_num = entry.get("loop", 1)
 
                             if station_name not in stations:
                                 stations[station_name] = {
                                     "name": station_name,
                                     "address": station_address,
                                     "hours": station_hours,
-                                    "rounds": [],
+                                    "loop_data": {},  # loop_num -> merged round
                                 }
 
-                            stations[station_name]["rounds"].append({
-                                "timestamp": ts,
-                                "label": label,
-                                "loop": entry.get("loop", 1),
-                                "step": entry.get("step", 0),
-                                "connectors": connectors,
-                            })
+                            sdata = stations[station_name]
+                            if loop_num not in sdata["loop_data"]:
+                                # First entry for this loop – create the round
+                                sdata["loop_data"][loop_num] = {
+                                    "timestamp": ts,
+                                    "label": label,
+                                    "loop": loop_num,
+                                    "step": entry.get("step", 0),
+                                    "connectors": {},  # keyed by charger_id::connector
+                                }
+
+                            merged = sdata["loop_data"][loop_num]
+                            # Use the earliest timestamp for the round header
+                            if ts < merged["timestamp"]:
+                                merged["timestamp"] = ts
+
+                            # Merge connectors – later captures within the same loop
+                            # can add new connectors or update existing ones
+                            for c in connectors:
+                                ck = f"{c['charger_id']}::{c['connector']}"
+                                merged["connectors"][ck] = c
+
                 except Exception:
                     continue
 
-        for station in stations.values():
-            station["rounds"].sort(key=lambda r: r["timestamp"])
+        # Flatten loop_data dicts into sorted round lists
+        result_stations = []
+        for sdata in stations.values():
+            rounds = []
+            for loop_num in sorted(sdata["loop_data"]):
+                merged = sdata["loop_data"][loop_num]
+                rounds.append({
+                    "timestamp": merged["timestamp"],
+                    "label": merged["label"],
+                    "loop": merged["loop"],
+                    "step": merged["step"],
+                    "connectors": list(merged["connectors"].values()),
+                })
+            result_stations.append({
+                "name": sdata["name"],
+                "address": sdata["address"],
+                "hours": sdata["hours"],
+                "rounds": rounds,
+            })
 
-        return {"stations": list(stations.values())}
+        return {"stations": result_stations}
 
     def _cv_station_name(self, all_text: list) -> str:
         """Extract the charging station name from all_text elements."""
@@ -6332,16 +6380,54 @@ class EditorHandler(BaseHTTPRequestHandler):
         return total, count
 
     def _disk_space(self) -> dict:
-        """Return disk usage info for the work directory with detailed breakdown."""
+        """Return disk usage info with detailed breakdown.
+
+        Uses the root filesystem (``/``) for the overall disk gauge so that
+        the numbers are meaningful even when ``/work`` lives on a tiny tmpfs
+        overlay.  Falls back to ``/work`` only when ``/`` is unavailable.
+        """
         try:
-            usage = shutil.disk_usage(self.work_dir)
+            # Pick the largest real partition for the overall gauge.
+            # /work may be a tiny tmpfs; / is usually the container root.
+            root_usage = shutil.disk_usage("/")
+            work_usage = shutil.disk_usage(self.work_dir)
+            # Use whichever partition is larger (root is almost always bigger)
+            usage = root_usage if root_usage.total >= work_usage.total else work_usage
+
+            # If /img is on a separate filesystem, add its capacity
+            img_dir = Path("/img")
+            img_on_separate_fs = False
+            if img_dir.exists():
+                try:
+                    img_usage = shutil.disk_usage("/img")
+                    # Consider it separate if it differs significantly from root
+                    if abs(img_usage.total - root_usage.total) > 50 * 1024 * 1024:
+                        img_on_separate_fs = True
+                except OSError:
+                    pass
+
+            # Aggregate total/used/free across relevant partitions
+            if img_on_separate_fs:
+                total = root_usage.total + img_usage.total
+                used = root_usage.used + img_usage.used
+                free = root_usage.free + img_usage.free
+            else:
+                total = usage.total
+                used = usage.used
+                free = usage.free
+
             log_dir = Path(self.work_dir) / "logs"
             log_size, log_count = self._dir_size(log_dir)
+            # Also count logs under /img/logs if it exists
+            img_log_dir = Path("/img/logs")
+            if img_log_dir.exists() and img_log_dir.resolve() != log_dir.resolve():
+                ils, ilc = self._dir_size(img_log_dir)
+                log_size += ils
+                log_count += ilc
 
             # Breakdown: captures, sent images, work data files, __pycache__
             captures_dir = Path("/img/captures")
             sent_dir = Path("/img/sent")
-            img_dir = Path("/img")
             pycache_size = 0
             pycache_count = 0
             for d in [Path(self.work_dir), Path("/usr/local/bin")]:
@@ -6380,10 +6466,10 @@ class EditorHandler(BaseHTTPRequestHandler):
 
             return {
                 "ok": True,
-                "total_gb": round(usage.total / (1024**3), 2),
-                "used_gb": round(usage.used / (1024**3), 2),
-                "free_gb": round(usage.free / (1024**3), 2),
-                "used_pct": round(usage.used / usage.total * 100, 1),
+                "total_gb": round(total / (1024**3), 2),
+                "used_gb": round(used / (1024**3), 2),
+                "free_gb": round(free / (1024**3), 2),
+                "used_pct": round(used / total * 100, 1) if total else 0,
                 "log_size_mb": round(log_size / (1024**2), 2),
                 "log_count": log_count,
                 "breakdown": {
