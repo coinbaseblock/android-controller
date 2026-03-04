@@ -5922,12 +5922,17 @@ class EditorHandler(BaseHTTPRequestHandler):
         errors = []
         details = {}
 
-        # 1. Clear all log files
+        # 1. Clear transient log files (preserve extract & station playback logs)
         log_dir = Path(self.work_dir) / "logs"
         log_del = 0
         if log_dir.exists():
             for p in log_dir.iterdir():
                 if p.is_file():
+                    # Skip user data logs that cannot be regenerated
+                    if p.name.endswith("-extract.jsonl") or p.name.startswith("extract-"):
+                        continue
+                    if p.name.endswith("-playback.json"):
+                        continue
                     try:
                         freed += p.stat().st_size
                         p.unlink()
@@ -6035,7 +6040,8 @@ class EditorHandler(BaseHTTPRequestHandler):
         errors = []
         details = {}
 
-        def _clean_old_files(directory: Path, label: str, recursive: bool = True):
+        def _clean_old_files(directory: Path, label: str, recursive: bool = True,
+                             skip_fn=None):
             nonlocal deleted, freed
             count = 0
             if not directory.exists():
@@ -6043,6 +6049,8 @@ class EditorHandler(BaseHTTPRequestHandler):
             files = directory.rglob("*") if recursive else directory.iterdir()
             for p in files:
                 if not p.is_file():
+                    continue
+                if skip_fn and skip_fn(p):
                     continue
                 try:
                     st = p.stat()
@@ -6057,7 +6065,12 @@ class EditorHandler(BaseHTTPRequestHandler):
 
         details["captures"] = _clean_old_files(Path("/img/captures"), "capture")
         details["sent"] = _clean_old_files(Path("/img/sent"), "sent")
-        details["logs"] = _clean_old_files(Path(self.work_dir) / "logs", "log", recursive=False)
+        def _is_user_data_log(p: Path) -> bool:
+            return (p.name.endswith("-extract.jsonl") or p.name.startswith("extract-")
+                    or p.name.endswith("-playback.json"))
+
+        details["logs"] = _clean_old_files(Path(self.work_dir) / "logs", "log",
+                                           recursive=False, skip_fn=_is_user_data_log)
 
         # Always clean pycache and temp files fully
         pc_del = 0
