@@ -218,9 +218,6 @@ class UniversalPlayer:
                 if self.loop_count > 0 and loop_idx > self.loop_count:
                     break
 
-                # Auto-cleanup before each loop if disk is getting full
-                self._auto_cleanup_if_needed()
-
                 self.log(f"=== Loop {loop_idx} ===")
                 success = self._play_one_loop(loop_idx)
 
@@ -747,86 +744,6 @@ class UniversalPlayer:
         elif method == "adb-push":
             prefix = adb_cmd(self.serial)
             run_adb(prefix + ["push", str(path), cfg.get("path", "/sdcard/")])
-
-    def _auto_cleanup_if_needed(self) -> None:
-        """Auto-cleanup disk space before each loop to prevent disk-full errors.
-
-        Progressive cleanup:
-          >95% → deep clean (delete everything including logs)
-          >85% → smart clean keeping last 1 hour
-          >70% → smart clean keeping last 3 hours
-        """
-        try:
-            screenshot_dir = Path(self.recording.settings.screenshot_dir)
-            # Use screenshot_dir's mount point for accurate disk usage
-            check_path = str(screenshot_dir) if screenshot_dir.exists() else "/img"
-            usage = shutil.disk_usage(check_path)
-            used_pct = usage.used / usage.total * 100
-
-            if used_pct <= 70:
-                return
-
-            free_mb = usage.free / (1024**2)
-            self.log(f"Disk usage: {used_pct:.1f}% (free: {free_mb:.0f} MB) — running cleanup", "WARN")
-
-            cleaned = 0
-            freed = 0
-
-            if used_pct > 95:
-                # Critical: delete everything
-                for d in [Path("/img/captures"), Path("/img/sent")]:
-                    if d.exists():
-                        for p in d.rglob("*"):
-                            if p.is_file():
-                                try:
-                                    freed += p.stat().st_size
-                                    p.unlink()
-                                    cleaned += 1
-                                except OSError:
-                                    pass
-                # Also clean logs
-                log_dir = screenshot_dir.parent / "logs"
-                if log_dir.exists():
-                    for p in log_dir.iterdir():
-                        if p.is_file():
-                            try:
-                                freed += p.stat().st_size
-                                p.unlink()
-                                cleaned += 1
-                            except OSError:
-                                pass
-            else:
-                # Moderate/High: delete old captures and sent images
-                keep_hours = 1 if used_pct > 85 else 3
-                cutoff = time.time() - (keep_hours * 3600)
-                for d in [Path("/img/captures"), Path("/img/sent")]:
-                    if d.exists():
-                        for p in d.rglob("*"):
-                            if p.is_file():
-                                try:
-                                    if p.stat().st_mtime < cutoff:
-                                        freed += p.stat().st_size
-                                        p.unlink()
-                                        cleaned += 1
-                                except OSError:
-                                    pass
-
-            # Always clean pycache and temp
-            for pattern_dir in [Path("/tmp"), Path("/var/tmp")]:
-                if pattern_dir.exists():
-                    for p in pattern_dir.rglob("*"):
-                        if p.is_file():
-                            try:
-                                freed += p.stat().st_size
-                                p.unlink()
-                                cleaned += 1
-                            except OSError:
-                                pass
-
-            if cleaned > 0:
-                self.log(f"Cleaned {cleaned} files, freed {freed / (1024**2):.1f} MB", "WARN")
-        except Exception:
-            pass  # Don't let cleanup errors break playback
 
     def _capture_error_screenshot(self, idx: int, loop_idx: int) -> None:
         try:
