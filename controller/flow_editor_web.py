@@ -1091,14 +1091,23 @@ input:focus, select:focus, textarea:focus { outline: none; border-color: var(--b
           <!-- Disk Space -->
           <div class="sidebar-section" data-hover-scope="disk-space">
             <h3>Disk Space</h3>
+            <div id="diskSpaceWarning" style="display:none;font-size:11px;color:#f85149;background:#f8514920;border:1px solid #f8514940;border-radius:4px;padding:4px 8px;margin-bottom:6px"></div>
             <div id="diskSpaceInfo" style="font-size:11px;color:var(--text2);margin-bottom:6px">Loading...</div>
             <div id="diskSpaceBar" style="height:6px;background:#21262d;border-radius:3px;overflow:hidden;margin-bottom:6px">
               <div id="diskSpaceUsed" style="height:100%;background:var(--green);border-radius:3px;transition:width .3s"></div>
             </div>
             <div id="diskBreakdown" style="font-size:10px;color:var(--text2);margin-bottom:6px;display:none"></div>
-            <div class="btn-group" style="gap:4px">
+            <div class="btn-group" style="gap:4px;flex-wrap:wrap">
               <button class="btn btn-sm" onclick="refreshDiskSpace()" title="Refresh disk space info">Refresh</button>
-              <button class="btn btn-sm btn-danger" onclick="deepClean()" title="Deep clean: remove captures, sent images, logs, cache, temp files">Deep Clean</button>
+              <button class="btn btn-sm" onclick="smartClean()" title="Smart clean: keep recent files (6h), delete older ones" style="color:#d29922;border-color:#d2992240">Smart Clean</button>
+              <button class="btn btn-sm btn-danger" onclick="deepClean()" title="Deep clean: remove ALL captures, sent images, logs, cache, temp files">Deep Clean</button>
+            </div>
+            <div id="diskCategoryActions" style="display:none;margin-top:6px;font-size:10px">
+              <div class="btn-group" style="gap:3px;flex-wrap:wrap">
+                <button class="btn btn-sm" onclick="deleteAllCaptures()" title="Delete all capture screenshots" style="font-size:10px;padding:1px 6px">Del Captures</button>
+                <button class="btn btn-sm" onclick="deleteAllSent()" title="Delete all sent images" style="font-size:10px;padding:1px 6px">Del Sent</button>
+                <button class="btn btn-sm" onclick="clearAllLogs()" title="Delete all log files" style="font-size:10px;padding:1px 6px">Del Logs</button>
+              </div>
             </div>
           </div>
           <!-- Station Data Viewer -->
@@ -2754,14 +2763,18 @@ setInterval(() => refreshStationLogs(), 10000);
 // ============================================================
 // DISK SPACE
 // ============================================================
+let _lastDiskPct = 0;
 async function refreshDiskSpace() {
   try {
     const data = await api('GET', '/disk-space');
     const el = document.getElementById('diskSpaceInfo');
     const bar = document.getElementById('diskSpaceUsed');
     const bd = document.getElementById('diskBreakdown');
+    const warn = document.getElementById('diskSpaceWarning');
+    const catActions = document.getElementById('diskCategoryActions');
     if (!data.ok) { el.textContent = 'Error: ' + (data.error || 'unknown'); return; }
     const pct = data.used_pct;
+    _lastDiskPct = pct;
     const color = pct > 90 ? 'var(--red)' : pct > 75 ? '#d29922' : 'var(--green)';
     bar.style.width = pct + '%';
     bar.style.background = color;
@@ -2769,6 +2782,19 @@ async function refreshDiskSpace() {
       '<span style="color:' + color + '">' + pct + '%</span>) | ' +
       'Free: <strong>' + data.free_gb + ' GB</strong>' +
       (data.log_count > 0 ? ' | Logs: <strong>' + data.log_size_mb + ' MB</strong> (' + data.log_count + ' files)' : '');
+    // Warning banner for low disk space
+    if (pct > 90) {
+      warn.innerHTML = '\u26a0 <strong>CRITICAL</strong>: Disk almost full (' + pct + '%). Use Smart Clean or Deep Clean now!';
+      warn.style.display = '';
+    } else if (pct > 80) {
+      warn.innerHTML = '\u26a0 Disk space is low (' + pct + '%). Consider cleaning old files.';
+      warn.style.display = '';
+      warn.style.color = '#d29922';
+      warn.style.background = '#d2992220';
+      warn.style.borderColor = '#d2992240';
+    } else {
+      warn.style.display = 'none';
+    }
     // Show breakdown if available
     if (data.breakdown) {
       const b = data.breakdown;
@@ -2785,11 +2811,14 @@ async function refreshDiskSpace() {
       } else {
         bd.style.display = 'none';
       }
+      // Show per-category delete buttons when there's something to delete
+      catActions.style.display = (b.captures_count > 0 || b.sent_count > 0 || data.log_count > 0) ? '' : 'none';
     }
   } catch (e) { /* ignore */ }
 }
 setTimeout(() => refreshDiskSpace(), 1500);
-setInterval(() => refreshDiskSpace(), 60000);
+// Refresh more often (30s) when disk is low, otherwise every 60s
+setInterval(() => refreshDiskSpace(), _lastDiskPct > 80 ? 30000 : 60000);
 
 async function deepClean() {
   if (!confirm('Deep Clean: Delete ALL captures, sent images, logs, cache, and temp files?\\nThis will free maximum disk space but cannot be undone.')) return;
@@ -2815,6 +2844,62 @@ async function deepClean() {
     }
     refreshExtractLogs();
     refreshStationLogs();
+    refreshDiskSpace();
+  } catch (e) { toast('Error: ' + e.message, 'error'); }
+}
+
+async function smartClean() {
+  if (!confirm('Smart Clean: Delete captures, sent images, and logs older than 6 hours?\\nRecent files will be kept.')) return;
+  try {
+    toast('Smart cleaning (keeping files < 6h old)...', 'info');
+    const res = await api('POST', '/smart-clean', { keep_hours: 6 });
+    if (res.ok) {
+      let msg = 'Smart clean done! Deleted ' + res.deleted + ' files, freed ' + res.freed_mb + ' MB';
+      if (res.details) {
+        const d = res.details;
+        const parts = [];
+        if (d.logs > 0) parts.push(d.logs + ' logs');
+        if (d.captures > 0) parts.push(d.captures + ' captures');
+        if (d.sent > 0) parts.push(d.sent + ' sent imgs');
+        if (d.pycache > 0) parts.push(d.pycache + ' cache');
+        if (d.tmp > 0) parts.push(d.tmp + ' temp');
+        if (d.system_cache > 0) parts.push(d.system_cache + ' sys cache');
+        if (parts.length > 0) msg += ' (' + parts.join(', ') + ')';
+      }
+      toast(msg, 'success');
+    } else {
+      toast('Smart clean error: ' + (res.error || 'unknown'), 'error');
+    }
+    refreshExtractLogs();
+    refreshStationLogs();
+    refreshDiskSpace();
+  } catch (e) { toast('Error: ' + e.message, 'error'); }
+}
+
+async function deleteAllCaptures() {
+  if (!confirm('Delete ALL capture screenshots? This cannot be undone.')) return;
+  try {
+    toast('Deleting captures...', 'info');
+    const res = await api('POST', '/delete-all-captures', {});
+    if (res.ok) {
+      toast('Deleted ' + res.deleted + ' captures, freed ' + res.freed_mb + ' MB', 'success');
+    } else {
+      toast('Error: ' + (res.error || 'unknown'), 'error');
+    }
+    refreshDiskSpace();
+  } catch (e) { toast('Error: ' + e.message, 'error'); }
+}
+
+async function deleteAllSent() {
+  if (!confirm('Delete ALL sent images? This cannot be undone.')) return;
+  try {
+    toast('Deleting sent images...', 'info');
+    const res = await api('POST', '/delete-all-sent', {});
+    if (res.ok) {
+      toast('Deleted ' + res.deleted + ' sent images, freed ' + res.freed_mb + ' MB', 'success');
+    } else {
+      toast('Error: ' + (res.error || 'unknown'), 'error');
+    }
     refreshDiskSpace();
   } catch (e) { toast('Error: ' + e.message, 'error'); }
 }
@@ -5017,6 +5102,17 @@ class EditorHandler(BaseHTTPRequestHandler):
             self._json(self._clear_all_logs())
         elif path == "/api/deep-clean":
             self._json(self._deep_clean())
+        elif path == "/api/smart-clean":
+            keep_hours = body.get("keep_hours", 6)
+            self._json(self._smart_clean(keep_hours=keep_hours))
+        elif path == "/api/auto-cleanup":
+            threshold = body.get("threshold_pct", 80.0)
+            result = self._auto_cleanup(threshold_pct=threshold)
+            self._json(result or {"ok": True, "skipped": True, "reason": "Disk usage below threshold"})
+        elif path == "/api/delete-all-captures":
+            self._json(self._delete_all_captures())
+        elif path == "/api/delete-all-sent":
+            self._json(self._delete_all_sent())
         elif path == "/api/delete-log":
             self._json(self._delete_single_log(body))
         else:
@@ -5162,6 +5258,8 @@ class EditorHandler(BaseHTTPRequestHandler):
             return {"ok": False, "error": "No recording path specified"}
         if not Path(recording_path).exists():
             return {"ok": False, "error": f"File not found: {recording_path}"}
+        # Auto-cleanup before playback if disk space is low
+        self._auto_cleanup(threshold_pct=80.0)
         return _proc_manager.start_play(recording_path, self.work_dir)
 
     def _start_record(self, body: dict) -> dict:
@@ -5923,6 +6021,157 @@ class EditorHandler(BaseHTTPRequestHandler):
             "errors": errors[:10],
         }
 
+    def _smart_clean(self, keep_hours: int = 6) -> dict:
+        """Clean old files while keeping recent ones (within keep_hours).
+
+        Unlike deep_clean which deletes everything, smart_clean preserves
+        recently-created captures, sent images, and logs.
+        """
+        import time
+
+        cutoff = time.time() - (keep_hours * 3600)
+        deleted = 0
+        freed = 0
+        errors = []
+        details = {}
+
+        def _clean_old_files(directory: Path, label: str, recursive: bool = True):
+            nonlocal deleted, freed
+            count = 0
+            if not directory.exists():
+                return count
+            files = directory.rglob("*") if recursive else directory.iterdir()
+            for p in files:
+                if not p.is_file():
+                    continue
+                try:
+                    st = p.stat()
+                    if st.st_mtime < cutoff:
+                        freed += st.st_size
+                        p.unlink()
+                        deleted += 1
+                        count += 1
+                except Exception as e:
+                    errors.append(f"{label} {p.name}: {e}")
+            return count
+
+        details["captures"] = _clean_old_files(Path("/img/captures"), "capture")
+        details["sent"] = _clean_old_files(Path("/img/sent"), "sent")
+        details["logs"] = _clean_old_files(Path(self.work_dir) / "logs", "log", recursive=False)
+
+        # Always clean pycache and temp files fully
+        pc_del = 0
+        for d in [Path(self.work_dir), Path("/usr/local/bin")]:
+            for pc in list(d.rglob("__pycache__")):
+                if pc.is_dir():
+                    try:
+                        for f in pc.rglob("*"):
+                            if f.is_file():
+                                freed += f.stat().st_size
+                                f.unlink()
+                                deleted += 1
+                                pc_del += 1
+                        shutil.rmtree(pc, ignore_errors=True)
+                    except Exception as e:
+                        errors.append(f"pycache: {e}")
+        details["pycache"] = pc_del
+
+        tmp_del = 0
+        work = Path(self.work_dir)
+        for pattern in ["*.tmp", "*.bak", "*.pyc", ".tmp_*"]:
+            for f in work.glob(pattern):
+                try:
+                    freed += f.stat().st_size
+                    f.unlink()
+                    deleted += 1
+                    tmp_del += 1
+                except Exception as e:
+                    errors.append(f"tmp {f.name}: {e}")
+        details["tmp"] = tmp_del
+
+        # System cache
+        sys_del = 0
+        for sys_dir in [Path("/var/cache/apt"), Path("/tmp"), Path("/var/tmp")]:
+            if sys_dir.exists():
+                for p in sys_dir.rglob("*"):
+                    if p.is_file():
+                        try:
+                            freed += p.stat().st_size
+                            p.unlink()
+                            deleted += 1
+                            sys_del += 1
+                        except Exception:
+                            pass
+        details["system_cache"] = sys_del
+
+        return {
+            "ok": True,
+            "deleted": deleted,
+            "freed_mb": round(freed / (1024**2), 2),
+            "details": details,
+            "keep_hours": keep_hours,
+            "errors": errors[:10],
+        }
+
+    def _auto_cleanup(self, threshold_pct: float = 80.0) -> dict | None:
+        """Auto-cleanup when disk usage exceeds threshold.
+
+        Returns cleanup result dict if cleanup was performed, None if not needed.
+        Designed to be called before playback or periodically.
+        """
+        try:
+            usage = shutil.disk_usage(self.work_dir)
+            used_pct = usage.used / usage.total * 100
+            if used_pct <= threshold_pct:
+                return None
+
+            # Progressive cleanup based on severity
+            if used_pct > 95:
+                # Critical: deep clean everything
+                return self._deep_clean()
+            elif used_pct > 90:
+                # High: keep only last 2 hours
+                return self._smart_clean(keep_hours=2)
+            else:
+                # Moderate: keep last 6 hours
+                return self._smart_clean(keep_hours=6)
+        except Exception:
+            return None
+
+    def _delete_all_captures(self) -> dict:
+        """Delete all capture screenshots."""
+        cap_dir = Path("/img/captures")
+        deleted = 0
+        freed = 0
+        errors = []
+        if cap_dir.exists():
+            for p in cap_dir.rglob("*"):
+                if p.is_file():
+                    try:
+                        freed += p.stat().st_size
+                        p.unlink()
+                        deleted += 1
+                    except Exception as e:
+                        errors.append(f"{p.name}: {e}")
+        return {"ok": True, "deleted": deleted, "freed_mb": round(freed / (1024**2), 2), "errors": errors}
+
+    def _delete_all_sent(self) -> dict:
+        """Delete all sent images."""
+        sent_dir = Path("/img/sent")
+        deleted = 0
+        freed = 0
+        errors = []
+        if sent_dir.exists():
+            for p in sent_dir.rglob("*"):
+                if p.is_file():
+                    try:
+                        freed += p.stat().st_size
+                        p.unlink()
+                        deleted += 1
+                    except Exception as e:
+                        errors.append(f"{p.name}: {e}")
+        return {"ok": True, "deleted": deleted, "freed_mb": round(freed / (1024**2), 2), "errors": errors}
+
     # -------- Delete / Clear Log endpoints --------
 
     def _delete_all_extract_logs(self) -> dict:
@@ -6102,6 +6351,9 @@ class EditorHandler(BaseHTTPRequestHandler):
         settings = body.get("settings", {})
         if not scripts:
             return {"ok": False, "error": "No scripts provided"}
+
+        # Auto-cleanup before sequence playback if disk space is low
+        self._auto_cleanup(threshold_pct=80.0)
 
         # Save temp sequence file
         seq_data = {"name": "temp_sequence", "scripts": scripts, "settings": settings}
