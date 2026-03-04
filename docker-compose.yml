@@ -3,6 +3,12 @@ services:
     build: ./controller
     container_name: adb-server
     privileged: true
+    # เพิ่ม shared memory เป็น 2GB (default 64MB)
+    shm_size: '2gb'
+    # storage-opt จำกัดขนาด writable layer ต่อ container (ต้องใช้ overlay2 + xfs backing)
+    # ถ้า Docker Engine ไม่รองรับ ให้ comment บรรทัดนี้ออก
+    storage_opt:
+      size: '20G'
     # ถ้าใช้ ADB over Wi-Fi อย่างเดียว อาจเอา devices: ออกได้
     devices:
       - "/dev/bus/usb:/dev/bus/usb"
@@ -14,6 +20,10 @@ services:
       - "D:/android-controller/adbkeys:/root/.android"
       - "D:/android-controller/data:/work"
       - "D:/android-controller/img:/img"
+    # tmpfs: ย้าย temp/cache ไปใช้ RAM เพื่อไม่กินพื้นที่ดิสก์ overlay
+    tmpfs:
+      - /tmp:size=512M
+      - /var/tmp:size=256M
     ports:
       - "5037:5037"
       - "8080:8080"   # Debug dashboard for automation engine
@@ -35,6 +45,9 @@ services:
     container_name: android-controller
     depends_on:
       - adb-server
+    shm_size: '2gb'
+    storage_opt:
+      size: '20G'
     # ใช้ network เดียวกับ adb-server เพื่อให้ 127.0.0.1 ของคอนเทนเนอร์นี้ ชี้ไปที่ adb-server
     network_mode: "service:adb-server"
     environment:
@@ -47,6 +60,9 @@ services:
       - "D:/android-controller/adbkeys:/root/.android"
       - "D:/android-controller/data:/work"
       - "D:/android-controller/img:/img"
+    tmpfs:
+      - /tmp:size=512M
+      - /var/tmp:size=256M
     command: |
       bash -lc '
         echo "controller ready; env:"
