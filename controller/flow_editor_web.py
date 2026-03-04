@@ -5688,17 +5688,33 @@ class EditorHandler(BaseHTTPRequestHandler):
         except Exception as e:
             return {"ok": False, "error": str(e)}
 
+    def _extract_log_dirs(self) -> list:
+        """Return all directories that may contain extract log files.
+
+        The player writes extract logs to ``{screenshot_dir}/../logs`` which
+        defaults to ``/img/logs/``, while the web editor itself writes to
+        ``{work_dir}/logs``.  We check both so that captures produced by
+        the player are always visible in the UI.
+        """
+        dirs = []
+        work_log = Path(self.work_dir) / "logs"
+        if work_log.exists():
+            dirs.append(work_log)
+        img_log = Path("/img/logs")
+        if img_log.exists() and img_log.resolve() != work_log.resolve():
+            dirs.append(img_log)
+        return dirs
+
     def _list_extract_logs(self) -> dict:
-        """List all extract JSONL log files in the work/logs directory."""
-        log_dir = Path(self.work_dir) / "logs"
+        """List all extract JSONL log files across known log directories."""
         logs = []
-        seen_paths: set = set()
-        if log_dir.exists():
+        seen_names: set = set()
+        for log_dir in self._extract_log_dirs():
             # Per-recording logs: station-01-extract.jsonl
             for p in sorted(log_dir.glob("*-extract.jsonl")):
-                if str(p) in seen_paths:
+                if p.name in seen_names:
                     continue
-                seen_paths.add(str(p))
+                seen_names.add(p.name)
                 line_count = self._count_lines(p)
                 logs.append({
                     "path": str(p),
@@ -5709,9 +5725,9 @@ class EditorHandler(BaseHTTPRequestHandler):
                 })
             # Legacy per-label logs: extract-ctrl_capture_5.jsonl
             for p in sorted(log_dir.glob("extract-*.jsonl")):
-                if str(p) in seen_paths:
+                if p.name in seen_names:
                     continue
-                seen_paths.add(str(p))
+                seen_names.add(p.name)
                 line_count = self._count_lines(p)
                 logs.append({
                     "path": str(p),
@@ -5729,11 +5745,11 @@ class EditorHandler(BaseHTTPRequestHandler):
         p = Path(path)
         if not p.exists():
             return {"error": f"File not found: {path}"}
-        # Safety check
-        try:
-            p.resolve().relative_to(Path(self.work_dir).resolve())
-        except ValueError:
-            return {"error": "Cannot read files outside work directory"}
+        # Safety check – allow both work_dir/logs and /img/logs
+        allowed_dirs = [Path(self.work_dir).resolve(), Path("/img/logs").resolve()]
+        resolved = p.resolve()
+        if not any(self._is_under(resolved, d) for d in allowed_dirs):
+            return {"error": "Cannot read files outside allowed directories"}
         try:
             entries = []
             with open(p, "r", encoding="utf-8") as f:
@@ -5755,6 +5771,15 @@ class EditorHandler(BaseHTTPRequestHandler):
                 return sum(1 for line in f if line.strip())
         except Exception:
             return 0
+
+    @staticmethod
+    def _is_under(child: Path, parent: Path) -> bool:
+        """Check if *child* is under *parent* directory."""
+        try:
+            child.relative_to(parent)
+            return True
+        except ValueError:
+            return False
 
     # -------- Station Playback Logs endpoints --------
 
@@ -6189,10 +6214,9 @@ class EditorHandler(BaseHTTPRequestHandler):
 
     def _delete_all_extract_logs(self) -> dict:
         """Delete all extract JSONL log files."""
-        log_dir = Path(self.work_dir) / "logs"
         deleted = 0
         errors = []
-        if log_dir.exists():
+        for log_dir in self._extract_log_dirs():
             for p in list(log_dir.glob("*-extract.jsonl")) + list(log_dir.glob("extract-*.jsonl")):
                 try:
                     p.unlink()
@@ -6219,11 +6243,22 @@ class EditorHandler(BaseHTTPRequestHandler):
 
     def _clear_all_logs(self) -> dict:
         """Delete ALL log files (extract + station + any other logs)."""
-        log_dir = Path(self.work_dir) / "logs"
         deleted = 0
         errors = []
+        # Clear work/logs
+        log_dir = Path(self.work_dir) / "logs"
         if log_dir.exists():
             for p in log_dir.iterdir():
+                if p.is_file():
+                    try:
+                        p.unlink()
+                        deleted += 1
+                    except Exception as e:
+                        errors.append(f"{p.name}: {e}")
+        # Also clear /img/logs (where the player writes extract logs)
+        img_log = Path("/img/logs")
+        if img_log.exists() and img_log.resolve() != log_dir.resolve():
+            for p in img_log.iterdir():
                 if p.is_file():
                     try:
                         p.unlink()
@@ -6240,10 +6275,10 @@ class EditorHandler(BaseHTTPRequestHandler):
         p = Path(path)
         if not p.exists():
             return {"error": f"File not found: {path}"}
-        try:
-            p.resolve().relative_to(Path(self.work_dir).resolve())
-        except ValueError:
-            return {"error": "Cannot delete files outside work directory"}
+        allowed_dirs = [Path(self.work_dir).resolve(), Path("/img/logs").resolve()]
+        resolved = p.resolve()
+        if not any(self._is_under(resolved, d) for d in allowed_dirs):
+            return {"error": "Cannot delete files outside allowed directories"}
         try:
             p.unlink()
             return {"ok": True}
@@ -6262,10 +6297,10 @@ class EditorHandler(BaseHTTPRequestHandler):
         if not p.exists():
             self._json({"error": f"File not found: {path}"})
             return
-        try:
-            p.resolve().relative_to(Path(self.work_dir).resolve())
-        except ValueError:
-            self._json({"error": "Cannot download files outside work directory"})
+        allowed_dirs = [Path(self.work_dir).resolve(), Path("/img/logs").resolve()]
+        resolved = p.resolve()
+        if not any(self._is_under(resolved, d) for d in allowed_dirs):
+            self._json({"error": "Cannot download files outside allowed directories"})
             return
         try:
             data = p.read_bytes()
@@ -6281,15 +6316,23 @@ class EditorHandler(BaseHTTPRequestHandler):
     def _download_all_logs_zip(self) -> None:
         """Download all log files as a single ZIP archive."""
         log_dir = Path(self.work_dir) / "logs"
-        if not log_dir.exists() or not any(log_dir.iterdir()):
+        img_log = Path("/img/logs")
+        all_dirs = [d for d in [log_dir, img_log] if d.exists()]
+        if not all_dirs:
             self._json({"error": "No log files found"})
             return
         try:
             buf = io.BytesIO()
+            seen_names: set = set()
             with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
-                for p in sorted(log_dir.iterdir()):
-                    if p.is_file():
-                        zf.write(p, p.name)
+                for d in all_dirs:
+                    for p in sorted(d.iterdir()):
+                        if p.is_file() and p.name not in seen_names:
+                            seen_names.add(p.name)
+                            zf.write(p, p.name)
+            if not seen_names:
+                self._json({"error": "No log files found"})
+                return
             data = buf.getvalue()
             ts = datetime.now().strftime("%Y%m%d_%H%M%S")
             filename = f"logs_{ts}.zip"
@@ -6304,14 +6347,15 @@ class EditorHandler(BaseHTTPRequestHandler):
 
     def _download_extract_logs_zip(self) -> None:
         """Download only extract log files as ZIP."""
-        log_dir = Path(self.work_dir) / "logs"
         try:
             buf = io.BytesIO()
             count = 0
+            seen_names: set = set()
             with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
-                if log_dir.exists():
+                for log_dir in self._extract_log_dirs():
                     for p in sorted(list(log_dir.glob("*-extract.jsonl")) + list(log_dir.glob("extract-*.jsonl"))):
-                        if p.is_file():
+                        if p.is_file() and p.name not in seen_names:
+                            seen_names.add(p.name)
                             zf.write(p, p.name)
                             count += 1
             if count == 0:
