@@ -5,11 +5,11 @@
   วิธีใช้ (รันใน PowerShell ด้วยสิทธิ์ Administrator):
     .\scripts\increase-docker-storage.ps1 -SizeGB 128
 
-  ค่า default: 128 GB (Docker Desktop default คือ 64 GB)
+  ค่า default: 256 GB (Docker Desktop default คือ 64 GB)
 #>
 
 param(
-    [int]$SizeGB = 128
+    [int]$SizeGB = 256
 )
 
 $ErrorActionPreference = "Stop"
