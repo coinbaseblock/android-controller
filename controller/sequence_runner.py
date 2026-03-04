@@ -166,6 +166,7 @@ class SequenceRunner:
                             loop=False,  # individual scripts don't loop
                             loop_count=1,
                             dry_run=self.dry_run,
+                            loop_offset=loop_idx - 1,
                         )
                         player.play()
 

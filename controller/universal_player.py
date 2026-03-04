@@ -110,12 +110,14 @@ class UniversalPlayer:
         loop_count: Optional[int] = None,
         dry_run: bool = False,
         debug_port: int = 0,
+        loop_offset: int = 0,
     ):
         self.recording = recording
         self.recording_path = recording_path
         self.replay_mode = replay_mode
         self.speed = speed
         self.dry_run = dry_run
+        self.loop_offset = loop_offset
         self.state = PlaybackState()
 
         # Loop settings: CLI overrides > recording settings
@@ -212,14 +214,15 @@ class UniversalPlayer:
         try:
             while self._running:
                 loop_idx += 1
-                self.state.current_loop = loop_idx
+                effective_loop = loop_idx + self.loop_offset
+                self.state.current_loop = effective_loop
                 self.state.status = "running"
 
                 if self.loop_count > 0 and loop_idx > self.loop_count:
                     break
 
-                self.log(f"=== Loop {loop_idx} ===")
-                success = self._play_one_loop(loop_idx)
+                self.log(f"=== Loop {effective_loop} ===")
+                success = self._play_one_loop(effective_loop)
 
                 if not self.loop:
                     break
