@@ -1116,6 +1116,7 @@ input:focus, select:focus, textarea:focus { outline: none; border-color: var(--b
             <div id="extractLogSummary" style="font-size:11px;color:var(--text2);margin-bottom:6px">No extract logs yet</div>
             <div class="btn-group" style="gap:4px;flex-wrap:wrap">
               <button class="btn btn-sm btn-primary" onclick="window.open('/station-data','_blank')" title="Open station data viewer in new tab">Open Data Viewer</button>
+              <button class="btn btn-sm btn-primary" onclick="window.open('/charger-view','_blank')" title="Open charger status view (organized by connector and round)">⚡ Charger View</button>
               <button class="btn btn-sm" onclick="refreshExtractLogs()" title="Refresh extract log count">Refresh</button>
               <button class="btn btn-sm" onclick="downloadExtractLogs()" title="Download all extract logs as ZIP">Download</button>
               <button class="btn btn-sm btn-danger" onclick="deleteAllExtractLogs()" title="Delete all extract log files">Delete All</button>
@@ -4989,6 +4990,264 @@ startAutoRefresh();
 
 
 # ============================================================
+# Charger Status Viewer - Organized per-connector status across rounds
+# ============================================================
+
+CHARGER_VIEW_HTML = r"""<!DOCTYPE html>
+<html lang="th">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Charger Status View</title>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:'Segoe UI',system-ui,sans-serif;background:#0f1117;color:#e1e4e8;line-height:1.5}
+.header{background:#161b22;padding:14px 24px;border-bottom:1px solid #30363d;display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px}
+.header h1{font-size:18px;font-weight:600;color:#58a6ff}
+.header .links{display:flex;gap:12px;align-items:center}
+.header a{color:#8b949e;text-decoration:none;font-size:13px}
+.header a:hover{color:#58a6ff}
+.controls{padding:10px 24px;background:#161b22;border-bottom:1px solid #21262d;display:flex;gap:10px;align-items:center;flex-wrap:wrap}
+.controls button{background:#21262d;border:1px solid #30363d;color:#c9d1d9;padding:5px 14px;border-radius:6px;cursor:pointer;font-size:13px}
+.controls button:hover{background:#30363d}
+.auto-refresh{display:flex;align-items:center;gap:6px;font-size:12px;color:#8b949e}
+.auto-refresh input{accent-color:#1f6feb}
+.container{max-width:1400px;margin:0 auto;padding:20px}
+.station-card{background:#161b22;border:1px solid #30363d;border-radius:10px;margin-bottom:24px;overflow:hidden}
+.station-header{padding:14px 20px;background:#1c2129;border-bottom:1px solid #21262d}
+.station-name{font-size:17px;font-weight:700;color:#f0f6fc;margin-bottom:4px}
+.station-meta{font-size:12px;color:#8b949e;display:flex;flex-wrap:wrap;gap:12px}
+.station-meta span{display:flex;align-items:center;gap:4px}
+.charger-block{border-bottom:1px solid #21262d}
+.charger-block:last-child{border-bottom:none}
+.charger-title{padding:8px 20px;background:#0d1117;font-size:12px;color:#8b949e;font-family:monospace;letter-spacing:.5px;display:flex;align-items:center;gap:8px}
+.charger-title .badge{background:#21262d;color:#c9d1d9;padding:1px 8px;border-radius:10px;font-size:11px}
+.table-wrap{overflow-x:auto}
+table{width:100%;border-collapse:collapse;min-width:500px}
+thead th{background:#161b22;padding:8px 14px;text-align:left;font-size:11px;color:#8b949e;font-weight:600;text-transform:uppercase;letter-spacing:.5px;white-space:nowrap;border-bottom:1px solid #21262d}
+thead th.round-col{text-align:center;min-width:120px}
+tbody tr:hover{background:#1c2129}
+td{padding:9px 14px;border-bottom:1px solid #0f1117;font-size:13px;vertical-align:middle}
+td.connector-cell{font-weight:600;color:#c9d1d9;white-space:nowrap}
+td.type-cell{color:#8b949e;font-size:12px;font-family:monospace}
+td.spec-cell{color:#d2a8ff;font-size:12px;white-space:nowrap}
+td.status-cell{text-align:center}
+.status-badge{display:inline-block;padding:3px 10px;border-radius:12px;font-size:12px;font-weight:600;white-space:nowrap}
+.status-available{background:#1a3a1a;color:#3fb950;border:1px solid #2ea043}
+.status-inuse{background:#3a1a1a;color:#f85149;border:1px solid #da3633}
+.status-booked{background:#3a2a1a;color:#d29922;border:1px solid #9e6a03}
+.status-closed{background:#2a2a2a;color:#8b949e;border:1px solid #30363d}
+.status-unknown{background:#21262d;color:#8b949e;border:1px solid #30363d}
+.round-header{font-size:12px;font-weight:700;color:#c9d1d9}
+.round-time{font-size:11px;color:#8b949e;font-family:monospace}
+.empty-state{text-align:center;padding:60px;color:#8b949e}
+.empty-state .icon{font-size:40px;margin-bottom:12px}
+.summary-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:10px;margin-bottom:20px}
+.summary-card{background:#161b22;border:1px solid #30363d;border-radius:8px;padding:14px;text-align:center}
+.summary-card .num{font-size:24px;font-weight:700;color:#58a6ff}
+.summary-card .label{font-size:11px;color:#8b949e;margin-top:2px}
+.loading{text-align:center;padding:60px;color:#8b949e}
+</style>
+</head>
+<body>
+<div class="header">
+  <h1>⚡ Charger Status View</h1>
+  <div class="links">
+    <a href="/">← Editor</a>
+    <a href="/station-data">Station Data</a>
+    <a href="/station-logs">Station Logs</a>
+  </div>
+</div>
+<div class="controls">
+  <button onclick="loadData()">↺ Refresh</button>
+  <label class="auto-refresh">
+    <input type="checkbox" id="autoRefresh" onchange="toggleAutoRefresh()">
+    Auto-refresh (30s)
+  </label>
+  <span id="lastUpdate" style="font-size:12px;color:#8b949e"></span>
+</div>
+<div class="container">
+  <div id="summaryArea"></div>
+  <div id="mainArea"><div class="loading">Loading charger data…</div></div>
+</div>
+
+<script>
+let refreshTimer = null;
+
+function statusClass(s) {
+  if (!s) return 'status-unknown';
+  if (s === 'พร้อมใช้งาน') return 'status-available';
+  if (s === 'มีผู้ใช้งาน') return 'status-inuse';
+  if (s === 'มีการจอง') return 'status-booked';
+  if (s === 'นอกเวลาทำการ') return 'status-closed';
+  return 'status-unknown';
+}
+
+function fmtTime(ts) {
+  if (!ts) return '';
+  const m = ts.match(/T(\d{2}:\d{2})/);
+  return m ? m[1] : ts.substring(0, 16);
+}
+
+function fmtDate(ts) {
+  if (!ts) return '';
+  return ts.substring(0, 10);
+}
+
+async function loadData() {
+  try {
+    const res = await fetch('/api/charger-data');
+    const data = await res.json();
+    render(data);
+    document.getElementById('lastUpdate').textContent = 'Updated: ' + new Date().toLocaleTimeString();
+  } catch(e) {
+    document.getElementById('mainArea').innerHTML = '<div class="empty-state"><div class="icon">⚠️</div><p>Error loading data: ' + e.message + '</p></div>';
+  }
+}
+
+function render(data) {
+  const stations = data.stations || [];
+  const summaryEl = document.getElementById('summaryArea');
+  const mainEl = document.getElementById('mainArea');
+
+  if (!stations.length) {
+    summaryEl.innerHTML = '';
+    mainEl.innerHTML = '<div class="empty-state"><div class="icon">📭</div><p>No charger data found in extract logs.</p><p style="font-size:12px;margin-top:8px;color:#6e7681">Run a recording that captures charger detail pages (ctrl_capture_4 through ctrl_capture_7).</p></div>';
+    return;
+  }
+
+  // Summary
+  let totalConnectors = 0, totalRounds = 0;
+  stations.forEach(s => {
+    totalRounds += s.rounds.length;
+    if (s.rounds.length) totalConnectors = Math.max(totalConnectors, s.rounds[0].connectors.length);
+  });
+
+  summaryEl.innerHTML = `
+    <div class="summary-grid">
+      <div class="summary-card"><div class="num">${stations.length}</div><div class="label">Station(s)</div></div>
+      <div class="summary-card"><div class="num">${totalRounds}</div><div class="label">Capture Rounds</div></div>
+      <div class="summary-card"><div class="num">${totalConnectors}</div><div class="label">Connectors</div></div>
+    </div>`;
+
+  // Build station cards
+  let html = '';
+  for (const station of stations) {
+    const rounds = station.rounds;
+    if (!rounds.length) continue;
+
+    // Collect all unique charger+connector keys in order
+    const connectorKeys = [];
+    const connectorMap = {}; // key -> {charger_id, connector, type, max_power, rate}
+    for (const round of rounds) {
+      for (const c of round.connectors) {
+        const k = `${c.charger_id}::${c.connector}`;
+        if (!connectorMap[k]) {
+          connectorMap[k] = c;
+          connectorKeys.push(k);
+        }
+      }
+    }
+
+    // Group connectors by charger_id
+    const chargerGroups = {};
+    for (const k of connectorKeys) {
+      const cid = connectorMap[k].charger_id;
+      if (!chargerGroups[cid]) chargerGroups[cid] = [];
+      chargerGroups[cid].push(k);
+    }
+
+    // Deduplicate rounds (same timestamp should not appear twice)
+    const seenTs = new Set();
+    const uniqueRounds = rounds.filter(r => {
+      if (seenTs.has(r.timestamp)) return false;
+      seenTs.add(r.timestamp);
+      return true;
+    });
+
+    // Round columns
+    const roundCols = uniqueRounds.map((r, i) => `
+      <th class="round-col">
+        <div class="round-header">รอบ ${i+1}</div>
+        <div class="round-time">${fmtTime(r.timestamp)}</div>
+        <div class="round-time" style="color:#6e7681">${fmtDate(r.timestamp)}</div>
+      </th>`).join('');
+
+    // Build round status lookups
+    const roundLookup = uniqueRounds.map(r => {
+      const m = {};
+      for (const c of r.connectors) {
+        m[`${c.charger_id}::${c.connector}`] = c.status;
+      }
+      return m;
+    });
+
+    // Build charger blocks
+    let chargerBlocksHtml = '';
+    for (const [cid, keys] of Object.entries(chargerGroups)) {
+      const rows = keys.map(k => {
+        const conn = connectorMap[k];
+        const statusCells = roundLookup.map(lookup => {
+          const s = lookup[k] || '';
+          return `<td class="status-cell"><span class="status-badge ${statusClass(s)}">${s || '–'}</span></td>`;
+        }).join('');
+        return `<tr>
+          <td class="connector-cell">${conn.connector || '?'}</td>
+          <td class="type-cell">${conn.type || ''}</td>
+          <td class="spec-cell">${conn.max_power ? conn.max_power + (conn.rate ? ' | ' + conn.rate : '') : ''}</td>
+          ${statusCells}
+        </tr>`;
+      }).join('');
+
+      chargerBlocksHtml += `
+        <div class="charger-block">
+          <div class="charger-title">เครื่องชาร์จ: <span class="badge">${cid}</span> <span style="color:#3fb950;font-size:11px">CC (สูงสุด 200A)</span></div>
+          <div class="table-wrap">
+            <table>
+              <thead><tr>
+                <th>หัวจ่าย</th>
+                <th>ประเภท</th>
+                <th>สเปค</th>
+                ${roundCols}
+              </tr></thead>
+              <tbody>${rows}</tbody>
+            </table>
+          </div>
+        </div>`;
+    }
+
+    html += `
+      <div class="station-card">
+        <div class="station-header">
+          <div class="station-name">📍 ${station.name}</div>
+          <div class="station-meta">
+            ${station.address ? '<span>🏠 ' + station.address + '</span>' : ''}
+            ${station.hours ? '<span>🕐 ' + station.hours + '</span>' : ''}
+          </div>
+        </div>
+        ${chargerBlocksHtml}
+      </div>`;
+  }
+
+  mainEl.innerHTML = html;
+}
+
+function toggleAutoRefresh() {
+  if (document.getElementById('autoRefresh').checked) {
+    refreshTimer = setInterval(loadData, 30000);
+  } else {
+    clearInterval(refreshTimer);
+    refreshTimer = null;
+  }
+}
+
+loadData();
+</script>
+</body>
+</html>"""
+
+
+# ============================================================
 # HTTP Server
 # ============================================================
 
@@ -5037,6 +5296,10 @@ class EditorHandler(BaseHTTPRequestHandler):
             self._html(STATION_DATA_HTML)
         elif path == "/station-logs":
             self._html(STATION_LOGS_HTML)
+        elif path == "/charger-view":
+            self._html(CHARGER_VIEW_HTML)
+        elif path == "/api/charger-data":
+            self._json(self._charger_data())
         elif path == "/api/station-logs":
             self._json(self._list_station_logs())
         elif path == "/api/station-log":
@@ -5704,6 +5967,207 @@ class EditorHandler(BaseHTTPRequestHandler):
         if img_log.exists() and img_log.resolve() != work_log.resolve():
             dirs.append(img_log)
         return dirs
+
+    def _charger_data(self) -> dict:
+        """Parse extract logs and return structured charger connector status data.
+
+        Reads all JSONL extract logs, finds entries that contain charger data
+        (identified by the presence of 'รหัสเครื่องชาร์จ' in all_text), parses
+        the connector statuses spatially, and returns data grouped by station
+        and recording round.
+        """
+        stations: dict = {}
+        seen_entries: set = set()
+
+        for log_dir in self._extract_log_dirs():
+            for p in sorted(log_dir.glob("*-extract.jsonl")):
+                try:
+                    with open(p, "r", encoding="utf-8") as f:
+                        for line in f:
+                            line = line.strip()
+                            if not line:
+                                continue
+                            try:
+                                entry = json.loads(line)
+                            except json.JSONDecodeError:
+                                continue
+
+                            ts = entry.get("timestamp", "")
+                            label = entry.get("label", "")
+                            dedup_key = f"{ts}_{label}"
+                            if dedup_key in seen_entries:
+                                continue
+                            seen_entries.add(dedup_key)
+
+                            all_text = entry.get("all_text", [])
+
+                            # Only process entries that have charger ID markers
+                            charger_entries = [
+                                e for e in all_text
+                                if "รหัสเครื่องชาร์จ" in e.get("text", "")
+                            ]
+                            if not charger_entries:
+                                continue
+
+                            charger_ids = []
+                            for e in sorted(charger_entries, key=lambda x: x["center"][1]):
+                                cid = e["text"].split(":")[-1].strip()
+                                if cid not in charger_ids:
+                                    charger_ids.append(cid)
+
+                            station_name = self._cv_station_name(all_text)
+                            station_address = self._cv_station_address(all_text)
+                            station_hours = self._cv_station_hours(all_text)
+
+                            if not station_name:
+                                station_name = "Unknown Station"
+
+                            connectors = self._cv_parse_connectors(all_text, charger_ids)
+
+                            if station_name not in stations:
+                                stations[station_name] = {
+                                    "name": station_name,
+                                    "address": station_address,
+                                    "hours": station_hours,
+                                    "rounds": [],
+                                }
+
+                            stations[station_name]["rounds"].append({
+                                "timestamp": ts,
+                                "label": label,
+                                "loop": entry.get("loop", 1),
+                                "step": entry.get("step", 0),
+                                "connectors": connectors,
+                            })
+                except Exception:
+                    continue
+
+        for station in stations.values():
+            station["rounds"].sort(key=lambda r: r["timestamp"])
+
+        return {"stations": list(stations.values())}
+
+    def _cv_station_name(self, all_text: list) -> str:
+        """Extract the charging station name from all_text elements."""
+        skip = {
+            "เปิด", "24 ชั่วโมง", "ข้อมูลเพิ่มเติม >", "แสดงทั้งหมด",
+            "หัวชาร์จที่ว่างตอนนี้", "Auto Charge", "เช็คอิน",
+            "CC (กระแสสูงสุด 200A)", "DC CCS COMBO 2",
+            "พร้อมใช้งาน", "มีผู้ใช้งาน", "นอกเวลาทำการ", "มีการจอง",
+        }
+        candidates = []
+        for e in all_text:
+            text = e.get("text", "")
+            cx = e.get("center", [0, 0])[0]
+            cy = e.get("center", [0, 0])[1]
+            if (
+                text and len(text) > 8
+                and 380 < cx < 720
+                and cy < 320
+                and text not in skip
+                and "ถ." not in text
+                and "แขวง" not in text
+                and "เขต" not in text
+                and "กม." not in text
+                and "รหัส" not in text
+            ):
+                candidates.append((abs(cy - 246), text))
+        if candidates:
+            candidates.sort(key=lambda x: x[0])
+            return candidates[0][1]
+        return ""
+
+    def _cv_station_address(self, all_text: list) -> str:
+        """Extract the station address from all_text."""
+        for e in sorted(all_text, key=lambda x: x["center"][1]):
+            text = e.get("text", "")
+            if ("ถ." in text or "แขวง" in text) and len(text) > 15:
+                return text
+        return ""
+
+    def _cv_station_hours(self, all_text: list) -> str:
+        """Extract station opening hours from all_text."""
+        for e in sorted(all_text, key=lambda x: x["center"][1]):
+            text = e.get("text", "")
+            if text.startswith("เปิด") and "ชั่วโมง" in text:
+                return text.split("|")[0].strip()
+            if text.startswith("เปิด") and ":" in text:
+                return text.split("|")[0].strip()
+        return ""
+
+    def _cv_parse_connectors(self, all_text: list, charger_ids: list) -> list:
+        """Parse connector-level status data from a single all_text list."""
+        sorted_elems = sorted(all_text, key=lambda x: x["center"][1])
+
+        # Y positions of each charger ID marker
+        charger_y: dict = {}
+        for e in sorted_elems:
+            text = e.get("text", "")
+            if "รหัสเครื่องชาร์จ" in text:
+                cid = text.split(":")[-1].strip()
+                charger_y[cid] = e["center"][1]
+
+        status_set = {"มีผู้ใช้งาน", "พร้อมใช้งาน", "นอกเวลาทำการ", "มีการจอง"}
+        dc_elems = [e for e in sorted_elems if e.get("text") == "DC CCS COMBO 2"]
+        status_elems = [e for e in sorted_elems if e.get("text") in status_set]
+        side_elems = [e for e in sorted_elems if e.get("text") in ("ซ้าย-A", "ขวา-B")]
+        rate_elems = [e for e in sorted_elems if "kWh" in e.get("text", "")]
+
+        connectors = []
+        seen: set = set()
+
+        for dc in dc_elems:
+            dc_y = dc["center"][1]
+
+            # Nearest charger ID marker above this connector
+            charger_id = None
+            best = float("inf")
+            for cid, cy in charger_y.items():
+                if cy <= dc_y and (dc_y - cy) < best:
+                    best = dc_y - cy
+                    charger_id = cid
+
+            # Status on the same row (within 30 px vertical)
+            status = None
+            for s in status_elems:
+                if abs(s["center"][1] - dc_y) <= 30:
+                    status = s["text"]
+                    break
+
+            # Connector side name just below (within 80 px)
+            connector = None
+            for side in side_elems:
+                gap = side["center"][1] - dc_y
+                if 0 < gap <= 80:
+                    connector = side["text"]
+                    break
+
+            # Rate/power spec below (within 200 px)
+            max_power = rate = ""
+            for r in rate_elems:
+                gap = r["center"][1] - dc_y
+                if 0 < gap <= 200:
+                    parts = r["text"].split("|")
+                    max_power = parts[0].replace("สูงสุด", "").strip()
+                    rate = parts[1].strip() if len(parts) > 1 else ""
+                    break
+
+            key = f"{charger_id}_{connector}"
+            if key in seen:
+                continue
+            seen.add(key)
+
+            connectors.append({
+                "charger_id": charger_id or "?",
+                "connector": connector or "?",
+                "type": "DC CCS COMBO 2",
+                "max_power": max_power,
+                "rate": rate,
+                "status": status or "ไม่ทราบ",
+            })
+
+        connectors.sort(key=lambda c: (c["charger_id"], c["connector"]))
+        return connectors
 
     def _list_extract_logs(self) -> dict:
         """List all extract JSONL log files across known log directories."""
