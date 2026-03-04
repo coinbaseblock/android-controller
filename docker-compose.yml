@@ -14,6 +14,13 @@ services:
       - "D:/android-controller/adbkeys:/root/.android"
       - "D:/android-controller/data:/work"
       - "D:/android-controller/img:/img"
+    # ย้าย temp/cache ไปใช้ RAM แทนดิสก์ — ประหยัดพื้นที่ดิสก์ได้เยอะ
+    tmpfs:
+      - /tmp:size=512M
+      - /var/tmp:size=256M
+      - /var/cache:size=256M
+    # เพิ่ม shared memory สำหรับ process ที่ใช้ shm
+    shm_size: '256m'
     ports:
       - "5037:5037"
       - "8080:8080"   # Debug dashboard for automation engine
@@ -47,6 +54,12 @@ services:
       - "D:/android-controller/adbkeys:/root/.android"
       - "D:/android-controller/data:/work"
       - "D:/android-controller/img:/img"
+    # ย้าย temp/cache ไปใช้ RAM แทนดิสก์
+    tmpfs:
+      - /tmp:size=512M
+      - /var/tmp:size=256M
+      - /var/cache:size=256M
+    shm_size: '256m'
     command: |
       bash -lc '
         echo "controller ready; env:"
