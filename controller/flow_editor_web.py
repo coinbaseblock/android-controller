@@ -5986,12 +5986,18 @@ class EditorHandler(BaseHTTPRequestHandler):
         merge all connector data within the same (station, loop) into one
         round so the view shows exactly one column per actual loop pass.
         """
-        # Intermediate: stations -> { name -> { meta, loop_data -> { loop -> merged_round } } }
+        # Intermediate: stations -> { name -> { meta, loop_data -> { global_loop -> merged_round } } }
         stations: dict = {}
         seen_entries: set = set()
+        # Track per-station global loop counter so loops from different log
+        # files don't collide (each file restarts loop at 1).
+        station_loop_offsets: dict = {}  # station_name -> next global loop
 
         for log_dir in self._extract_log_dirs():
             for p in sorted(log_dir.glob("*-extract.jsonl")):
+                # Track which (station, file_loop) combos this file contributes
+                # so we can assign unique global loop numbers per file.
+                file_loop_map: dict = {}  # (station_name, file_loop) -> global_loop
                 try:
                     with open(p, "r", encoding="utf-8") as f:
                         for line in f:
@@ -6038,15 +6044,23 @@ class EditorHandler(BaseHTTPRequestHandler):
                             if not connectors:
                                 continue
 
-                            loop_num = entry.get("loop", 1)
+                            file_loop = entry.get("loop", 1)
 
                             if station_name not in stations:
                                 stations[station_name] = {
                                     "name": station_name,
                                     "address": station_address,
                                     "hours": station_hours,
-                                    "loop_data": {},  # loop_num -> merged round
+                                    "loop_data": {},  # global_loop -> merged round
                                 }
+                                station_loop_offsets[station_name] = 1
+
+                            # Map file-local loop to a unique global loop number
+                            fkey = (station_name, file_loop)
+                            if fkey not in file_loop_map:
+                                file_loop_map[fkey] = station_loop_offsets[station_name]
+                                station_loop_offsets[station_name] += 1
+                            loop_num = file_loop_map[fkey]
 
                             sdata = stations[station_name]
                             if loop_num not in sdata["loop_data"]:
@@ -6096,32 +6110,50 @@ class EditorHandler(BaseHTTPRequestHandler):
         return {"stations": result_stations}
 
     def _cv_station_name(self, all_text: list) -> str:
-        """Extract the charging station name from all_text elements."""
+        """Extract the charging station name from all_text elements.
+
+        The station name appears on the detail page above the first charger ID
+        marker.  We look for the longest qualifying text element that sits
+        above the topmost 'รหัสเครื่องชาร์จ' line and contains a recognisable
+        station name pattern (e.g. 'สเตชั่น', 'สถานี', or a long Thai name).
+        """
         skip = {
             "เปิด", "24 ชั่วโมง", "ข้อมูลเพิ่มเติม >", "แสดงทั้งหมด",
             "หัวชาร์จที่ว่างตอนนี้", "Auto Charge", "เช็คอิน",
-            "CC (กระแสสูงสุด 200A)", "DC CCS COMBO 2",
+            "CC (กระแสสูงสุด 200A)", "DC CCS COMBO 2", "AC Type 2",
             "พร้อมใช้งาน", "มีผู้ใช้งาน", "นอกเวลาทำการ", "มีการจอง",
+            "กดเพื่ออัปเดตข้อมูล", "สถานีที่บันทึกไว้",
         }
+        skip_substrings = ("ถ.", "แขวง", "เขต", "กม.", "รหัส", "หมายเหตุ",
+                           "kWh", "ชั่วโมง", "สูงสุด", "อัตราค่า")
+
+        # Find the Y of the topmost charger ID marker as an upper bound
+        charger_y = None
+        for e in all_text:
+            if "รหัสเครื่องชาร์จ" in e.get("text", ""):
+                ey = e.get("center", [0, 0])[1]
+                if charger_y is None or ey < charger_y:
+                    charger_y = ey
+
         candidates = []
         for e in all_text:
             text = e.get("text", "")
-            cx = e.get("center", [0, 0])[0]
             cy = e.get("center", [0, 0])[1]
-            if (
-                text and len(text) > 8
-                and 380 < cx < 720
-                and cy < 320
-                and text not in skip
-                and "ถ." not in text
-                and "แขวง" not in text
-                and "เขต" not in text
-                and "กม." not in text
-                and "รหัส" not in text
-            ):
-                candidates.append((abs(cy - 246), text))
+            if not text or len(text) <= 8:
+                continue
+            if text in skip:
+                continue
+            if any(sub in text for sub in skip_substrings):
+                continue
+            # Must be above the first charger ID marker
+            if charger_y is not None and cy >= charger_y:
+                continue
+            # Station names are typically long Thai text
+            candidates.append((cy, text))
+
         if candidates:
-            candidates.sort(key=lambda x: x[0])
+            # Pick the candidate closest (just above) to the charger section
+            candidates.sort(key=lambda x: -x[0])
             return candidates[0][1]
         return ""
 
@@ -6144,7 +6176,10 @@ class EditorHandler(BaseHTTPRequestHandler):
         return ""
 
     def _cv_parse_connectors(self, all_text: list, charger_ids: list) -> list:
-        """Parse connector-level status data from a single all_text list."""
+        """Parse connector-level status data from a single all_text list.
+
+        Handles both DC (DC CCS COMBO 2) and AC (AC Type 2) connectors.
+        """
         sorted_elems = sorted(all_text, key=lambda x: x["center"][1])
 
         # Y positions of each charger ID marker
@@ -6156,36 +6191,40 @@ class EditorHandler(BaseHTTPRequestHandler):
                 charger_y[cid] = e["center"][1]
 
         status_set = {"มีผู้ใช้งาน", "พร้อมใช้งาน", "นอกเวลาทำการ", "มีการจอง"}
-        dc_elems = [e for e in sorted_elems if e.get("text") == "DC CCS COMBO 2"]
+        connector_types = {"DC CCS COMBO 2", "AC Type 2"}
+        type_elems = [e for e in sorted_elems if e.get("text") in connector_types]
         status_elems = [e for e in sorted_elems if e.get("text") in status_set]
-        side_elems = [e for e in sorted_elems if e.get("text") in ("ซ้าย-A", "ขวา-B")]
+        # Include all known side/position names
+        side_names = {"ซ้าย-A", "ขวา-B", "กลาง-A", "ซ้าย ที-2"}
+        side_elems = [e for e in sorted_elems if e.get("text") in side_names]
         rate_elems = [e for e in sorted_elems if "kWh" in e.get("text", "")]
 
         connectors = []
         seen: set = set()
 
-        for dc in dc_elems:
-            dc_y = dc["center"][1]
+        for te in type_elems:
+            te_y = te["center"][1]
+            conn_type = te["text"]
 
             # Nearest charger ID marker above this connector
             charger_id = None
             best = float("inf")
             for cid, cy in charger_y.items():
-                if cy <= dc_y and (dc_y - cy) < best:
-                    best = dc_y - cy
+                if cy <= te_y and (te_y - cy) < best:
+                    best = te_y - cy
                     charger_id = cid
 
             # Status on the same row (within 30 px vertical)
             status = None
             for s in status_elems:
-                if abs(s["center"][1] - dc_y) <= 30:
+                if abs(s["center"][1] - te_y) <= 30:
                     status = s["text"]
                     break
 
             # Connector side name just below (within 80 px)
             connector = None
             for side in side_elems:
-                gap = side["center"][1] - dc_y
+                gap = side["center"][1] - te_y
                 if 0 < gap <= 80:
                     connector = side["text"]
                     break
@@ -6193,7 +6232,7 @@ class EditorHandler(BaseHTTPRequestHandler):
             # Rate/power spec below (within 200 px)
             max_power = rate = ""
             for r in rate_elems:
-                gap = r["center"][1] - dc_y
+                gap = r["center"][1] - te_y
                 if 0 < gap <= 200:
                     parts = r["text"].split("|")
                     max_power = parts[0].replace("สูงสุด", "").strip()
@@ -6208,7 +6247,7 @@ class EditorHandler(BaseHTTPRequestHandler):
             connectors.append({
                 "charger_id": charger_id or "?",
                 "connector": connector or "?",
-                "type": "DC CCS COMBO 2",
+                "type": conn_type,
                 "max_power": max_power,
                 "rate": rate,
                 "status": status or "ไม่ทราบ",
