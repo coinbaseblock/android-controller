@@ -2747,9 +2747,9 @@ async function refreshStationLogs() {
     // ignore
   }
 }
-// Auto-refresh station log summary periodically
+// Auto-refresh station log summary periodically (10s to match Station Logs page)
 setTimeout(() => refreshStationLogs(), 2500);
-setInterval(() => refreshStationLogs(), 30000);
+setInterval(() => refreshStationLogs(), 10000);
 
 // ============================================================
 // DISK SPACE
@@ -4909,6 +4909,11 @@ startAutoRefresh();
 
 class EditorHandler(BaseHTTPRequestHandler):
     work_dir: str = "/work"
+    # Short TTL cache for station logs to ensure consistent data across
+    # concurrent requests (sidebar + detail page) during active run loops.
+    _station_logs_cache: dict | None = None
+    _station_logs_cache_ts: float = 0.0
+    _STATION_LOGS_CACHE_TTL: float = 3.0  # seconds
 
     def log_message(self, format: str, *args: Any) -> None:
         pass
@@ -5656,13 +5661,28 @@ class EditorHandler(BaseHTTPRequestHandler):
     # -------- Station Playback Logs endpoints --------
 
     def _list_station_logs(self) -> dict:
-        """List all station playback JSON log files in the work/logs directory."""
+        """List all station playback JSON log files in the work/logs directory.
+
+        Uses a short TTL cache to ensure consistent data when the sidebar
+        and the Station Logs detail page both request data near-simultaneously.
+        """
+        now = time.time()
+        if (
+            EditorHandler._station_logs_cache is not None
+            and (now - EditorHandler._station_logs_cache_ts) < EditorHandler._STATION_LOGS_CACHE_TTL
+        ):
+            return EditorHandler._station_logs_cache
+
         log_dir = Path(self.work_dir) / "logs"
         logs = []
         if log_dir.exists():
             for p in sorted(log_dir.glob("station-*-playback.json")):
                 try:
-                    data = json.loads(p.read_text(encoding="utf-8"))
+                    raw = p.read_text(encoding="utf-8")
+                    if not raw.strip():
+                        # File is being written (truncated but not yet filled)
+                        continue
+                    data = json.loads(raw)
                     runs = data.get("runs", [])
                     rec = data.get("recording", {})
                     total_runs = len(runs)
@@ -5681,18 +5701,14 @@ class EditorHandler(BaseHTTPRequestHandler):
                         "size_kb": round(p.stat().st_size / 1024, 1),
                     })
                 except (json.JSONDecodeError, Exception):
-                    logs.append({
-                        "path": str(p),
-                        "name": p.name,
-                        "station": p.stem.replace("-playback", ""),
-                        "total_runs": 0,
-                        "success_runs": 0,
-                        "error_runs": 0,
-                        "total_frames": 0,
-                        "last_run_at": None,
-                        "size_kb": round(p.stat().st_size / 1024, 1),
-                    })
-        return {"logs": logs}
+                    # File may be mid-write (partial JSON); skip rather than
+                    # reporting 0 runs which causes sidebar/detail mismatch.
+                    continue
+
+        result = {"logs": logs}
+        EditorHandler._station_logs_cache = result
+        EditorHandler._station_logs_cache_ts = now
+        return result
 
     def _read_station_log(self, path: str) -> dict:
         """Read a station playback log JSON file and return its full data."""
@@ -5935,6 +5951,8 @@ class EditorHandler(BaseHTTPRequestHandler):
                     deleted += 1
                 except Exception as e:
                     errors.append(f"{p.name}: {e}")
+        # Invalidate cache so next read reflects deletion immediately
+        EditorHandler._station_logs_cache = None
         return {"ok": True, "deleted": deleted, "errors": errors}
 
     def _clear_all_logs(self) -> dict:

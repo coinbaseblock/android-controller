@@ -37,6 +37,8 @@ Log structure:
 from __future__ import annotations
 
 import json
+import os
+import tempfile
 import threading
 import time
 from datetime import datetime
@@ -157,12 +159,29 @@ class PlaybackLogger:
             return json.loads(json.dumps(self._data))
 
     def _save(self) -> None:
-        """Persist JSON log to disk."""
+        """Persist JSON log to disk using atomic write (temp file + rename)."""
         try:
-            self.log_path.write_text(
-                json.dumps(self._data, indent=2, ensure_ascii=False),
-                encoding="utf-8",
+            content = json.dumps(self._data, indent=2, ensure_ascii=False)
+            # Atomic write: write to temp file in the same directory, then rename.
+            # os.replace() is atomic on POSIX, preventing partial reads.
+            fd, tmp_path = tempfile.mkstemp(
+                dir=str(self.log_path.parent),
+                suffix=".tmp",
+                prefix=self.log_path.stem,
             )
+            try:
+                with os.fdopen(fd, "w", encoding="utf-8") as f:
+                    f.write(content)
+                    f.flush()
+                    os.fsync(f.fileno())
+                os.replace(tmp_path, str(self.log_path))
+            except Exception:
+                # Clean up temp file on failure
+                try:
+                    os.unlink(tmp_path)
+                except OSError:
+                    pass
+                raise
         except Exception:
             pass
 
