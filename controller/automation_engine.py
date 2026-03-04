@@ -159,6 +159,9 @@ class AutomationEngine:
                     self.log("Reached loop count limit.", "INFO")
                     break
 
+                # Auto-cleanup before each loop if disk is getting full
+                self._auto_cleanup_if_needed()
+
                 self.log(f"=== Loop {loop_idx} ===", "INFO")
                 result = self._run_one_loop(loop_idx)
 
@@ -496,6 +499,77 @@ class AutomationEngine:
             nf = notify_path / f"error-{ts}.json"
             nf.write_text(json.dumps(message, indent=2, ensure_ascii=False), encoding="utf-8")
             self.log(f"  Notification saved to {nf}")
+
+    def _auto_cleanup_if_needed(self) -> None:
+        """Auto-cleanup disk space before each loop to prevent disk-full errors."""
+        try:
+            check_path = self.config.screenshot_dir if Path(self.config.screenshot_dir).exists() else "/img"
+            usage = shutil.disk_usage(check_path)
+            used_pct = usage.used / usage.total * 100
+
+            if used_pct <= 70:
+                return
+
+            free_mb = usage.free / (1024**2)
+            self.log(f"Disk usage: {used_pct:.1f}% (free: {free_mb:.0f} MB) — running cleanup", "WARN")
+
+            cleaned = 0
+            freed = 0
+
+            if used_pct > 95:
+                # Critical: delete all captures, sent, and logs
+                for d in [Path("/img/captures"), Path("/img/sent")]:
+                    if d.exists():
+                        for p in d.rglob("*"):
+                            if p.is_file():
+                                try:
+                                    freed += p.stat().st_size
+                                    p.unlink()
+                                    cleaned += 1
+                                except OSError:
+                                    pass
+                log_dir = Path(self.config.screenshot_dir).parent / "logs"
+                if log_dir.exists():
+                    for p in log_dir.iterdir():
+                        if p.is_file():
+                            try:
+                                freed += p.stat().st_size
+                                p.unlink()
+                                cleaned += 1
+                            except OSError:
+                                pass
+            else:
+                # Moderate/High: delete old captures and sent images
+                keep_hours = 1 if used_pct > 85 else 3
+                cutoff = time.time() - (keep_hours * 3600)
+                for d in [Path("/img/captures"), Path("/img/sent")]:
+                    if d.exists():
+                        for p in d.rglob("*"):
+                            if p.is_file():
+                                try:
+                                    if p.stat().st_mtime < cutoff:
+                                        freed += p.stat().st_size
+                                        p.unlink()
+                                        cleaned += 1
+                                except OSError:
+                                    pass
+
+            # Always clean temp dirs
+            for tmp_dir in [Path("/tmp"), Path("/var/tmp")]:
+                if tmp_dir.exists():
+                    for p in tmp_dir.rglob("*"):
+                        if p.is_file():
+                            try:
+                                freed += p.stat().st_size
+                                p.unlink()
+                                cleaned += 1
+                            except OSError:
+                                pass
+
+            if cleaned > 0:
+                self.log(f"Cleaned {cleaned} files, freed {freed / (1024**2):.1f} MB", "WARN")
+        except Exception:
+            pass  # Don't let cleanup errors break automation
 
     def _capture_step_screenshot(self, step_idx: int, loop_idx: int, tag: str) -> Path:
         ts = datetime.now().strftime("%Y%m%d-%H%M%S")

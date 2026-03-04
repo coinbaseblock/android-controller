@@ -2775,7 +2775,7 @@ async function refreshDiskSpace() {
     if (!data.ok) { el.textContent = 'Error: ' + (data.error || 'unknown'); return; }
     const pct = data.used_pct;
     _lastDiskPct = pct;
-    const color = pct > 90 ? 'var(--red)' : pct > 75 ? '#d29922' : 'var(--green)';
+    const color = pct > 85 ? 'var(--red)' : pct > 60 ? '#d29922' : 'var(--green)';
     bar.style.width = pct + '%';
     bar.style.background = color;
     el.innerHTML = '<strong>' + data.used_gb + '</strong> / ' + data.total_gb + ' GB used (' +
@@ -2783,11 +2783,11 @@ async function refreshDiskSpace() {
       'Free: <strong>' + data.free_gb + ' GB</strong>' +
       (data.log_count > 0 ? ' | Logs: <strong>' + data.log_size_mb + ' MB</strong> (' + data.log_count + ' files)' : '');
     // Warning banner for low disk space
-    if (pct > 90) {
+    if (pct > 85) {
       warn.innerHTML = '\u26a0 <strong>CRITICAL</strong>: Disk almost full (' + pct + '%). Use Smart Clean or Deep Clean now!';
       warn.style.display = '';
-    } else if (pct > 80) {
-      warn.innerHTML = '\u26a0 Disk space is low (' + pct + '%). Consider cleaning old files.';
+    } else if (pct > 60) {
+      warn.innerHTML = '\u26a0 Disk space is getting low (' + pct + '%). Auto-cleanup is active. Consider cleaning old files.';
       warn.style.display = '';
       warn.style.color = '#d29922';
       warn.style.background = '#d2992220';
@@ -2818,7 +2818,7 @@ async function refreshDiskSpace() {
 }
 setTimeout(() => refreshDiskSpace(), 1500);
 // Refresh more often (30s) when disk is low, otherwise every 60s
-setInterval(() => refreshDiskSpace(), _lastDiskPct > 80 ? 30000 : 60000);
+setInterval(() => refreshDiskSpace(), _lastDiskPct > 60 ? 30000 : 60000);
 
 async function deepClean() {
   if (!confirm('Deep Clean: Delete ALL captures, sent images, logs, cache, and temp files?\\nThis will free maximum disk space but cannot be undone.')) return;
@@ -5259,7 +5259,7 @@ class EditorHandler(BaseHTTPRequestHandler):
         if not Path(recording_path).exists():
             return {"ok": False, "error": f"File not found: {recording_path}"}
         # Auto-cleanup before playback if disk space is low
-        self._auto_cleanup(threshold_pct=80.0)
+        self._auto_cleanup(threshold_pct=60.0)
         return _proc_manager.start_play(recording_path, self.work_dir)
 
     def _start_record(self, body: dict) -> dict:
@@ -5270,6 +5270,8 @@ class EditorHandler(BaseHTTPRequestHandler):
             return {"ok": False, "error": "No package specified"}
         if not output_path:
             output_path = str(Path(self.work_dir) / "new-recording.urf.json")
+        # Auto-cleanup before recording if disk space is low
+        self._auto_cleanup(threshold_pct=60.0)
         return _proc_manager.start_record(output_path, package, device, self.work_dir)
 
     def _capture_screen(self, params: dict) -> None:
@@ -6126,11 +6128,17 @@ class EditorHandler(BaseHTTPRequestHandler):
             "errors": errors[:10],
         }
 
-    def _auto_cleanup(self, threshold_pct: float = 80.0) -> dict | None:
+    def _auto_cleanup(self, threshold_pct: float = 60.0) -> dict | None:
         """Auto-cleanup when disk usage exceeds threshold.
 
         Returns cleanup result dict if cleanup was performed, None if not needed.
         Designed to be called before playback or periodically.
+
+        Progressive cleanup tiers:
+          >95% → deep clean (everything including logs)
+          >85% → smart clean keeping last 1 hour
+          >75% → smart clean keeping last 3 hours
+          >60% → smart clean keeping last 6 hours
         """
         try:
             usage = shutil.disk_usage(self.work_dir)
@@ -6140,13 +6148,36 @@ class EditorHandler(BaseHTTPRequestHandler):
 
             # Progressive cleanup based on severity
             if used_pct > 95:
-                # Critical: deep clean everything
-                return self._deep_clean()
-            elif used_pct > 90:
-                # High: keep only last 2 hours
-                return self._smart_clean(keep_hours=2)
+                # Critical: deep clean everything including logs
+                result = self._deep_clean()
+                # At critical level, also clean extract & station logs
+                log_dir = Path(self.work_dir) / "logs"
+                extra_freed = 0
+                extra_del = 0
+                if log_dir.exists():
+                    for p in log_dir.iterdir():
+                        if p.is_file():
+                            try:
+                                extra_freed += p.stat().st_size
+                                p.unlink()
+                                extra_del += 1
+                            except Exception:
+                                pass
+                if extra_del > 0:
+                    result["deleted"] = result.get("deleted", 0) + extra_del
+                    result["freed_mb"] = round(
+                        result.get("freed_mb", 0) + extra_freed / (1024**2), 2
+                    )
+                    result.setdefault("details", {})["extract_station_logs"] = extra_del
+                return result
+            elif used_pct > 85:
+                # High: keep only last 1 hour
+                return self._smart_clean(keep_hours=1)
+            elif used_pct > 75:
+                # Elevated: keep last 3 hours
+                return self._smart_clean(keep_hours=3)
             else:
-                # Moderate: keep last 6 hours
+                # Moderate (60-75%): keep last 6 hours
                 return self._smart_clean(keep_hours=6)
         except Exception:
             return None
@@ -6366,7 +6397,7 @@ class EditorHandler(BaseHTTPRequestHandler):
             return {"ok": False, "error": "No scripts provided"}
 
         # Auto-cleanup before sequence playback if disk space is low
-        self._auto_cleanup(threshold_pct=80.0)
+        self._auto_cleanup(threshold_pct=60.0)
 
         # Save temp sequence file
         seq_data = {"name": "temp_sequence", "scripts": scripts, "settings": settings}
