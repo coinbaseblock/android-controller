@@ -5402,6 +5402,18 @@ function exportHTML() {
 
   const stations = lastData.stations || [];
 
+  // Build loop -> timestamp from the first available station round.
+  // This keeps exported columns aligned with source capture timing.
+  const loopTimestamps = {};
+  for (const station of stations) {
+    for (const round of (station.rounds || [])) {
+      if (!round || !round.loop || round.loop < 1 || round.loop > complete) continue;
+      if (!loopTimestamps[round.loop] && round.timestamp) {
+        loopTimestamps[round.loop] = round.timestamp;
+      }
+    }
+  }
+
   // Build HTML table with inline styles for color support in Excel/WPS
   let html = '<!DOCTYPE html>\n<html lang="th">\n<head><meta charset="UTF-8"><title>Charger Status</title></head>\n<body>\n';
   html += '<style>table{border-collapse:collapse;font-family:sans-serif;font-size:13px}th,td{border:1px solid #ccc;padding:6px 10px;white-space:nowrap}th{background:#f2f2f2;font-weight:bold;text-align:center}.legend{margin:10px 0;font-size:13px}.legend span{display:inline-block;padding:3px 10px;border-radius:4px;margin-right:8px;font-weight:600}</style>\n';
@@ -5416,8 +5428,14 @@ function exportHTML() {
 
   html += '<table>\n<thead><tr>';
   const headers = ['สถานี', 'เครื่องชาร์จ', 'หัวจ่าย', 'ประเภท', 'กำลังไฟ', 'อัตราค่าบริการ'];
-  for (const h of headers) html += '<th>' + h + '</th>';
+  for (const h of headers) html += '<th rowspan="2">' + h + '</th>';
   for (let i = 1; i <= complete; i++) html += '<th>รอบ ' + i + '</th>';
+  html += '</tr><tr>';
+  for (let i = 1; i <= complete; i++) {
+    const ts = loopTimestamps[i];
+    const timeLabel = ts ? (fmtDate(ts) + ' ' + fmtTime(ts)).trim() : '-';
+    html += '<th style="font-size:11px;color:#666;font-weight:500">' + timeLabel + '</th>';
+  }
   html += '</tr></thead>\n<tbody>\n';
 
   for (const station of stations) {
