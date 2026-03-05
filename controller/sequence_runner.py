@@ -107,6 +107,32 @@ class SequenceRunner:
             "results": self.results[-20:],
         }
 
+    def _cleanup_captures(self) -> None:
+        """Delete capture and sent images after each loop to free disk space.
+
+        Screenshots in /img/captures and /img/sent are transient – extract
+        data has already been written to the JSONL logs, so the raw PNGs
+        are no longer needed.
+        """
+        deleted = 0
+        freed = 0
+        for dir_path in [Path("/img/captures"), Path("/img/sent")]:
+            if not dir_path.exists():
+                continue
+            for f in dir_path.iterdir():
+                if f.is_file():
+                    try:
+                        freed += f.stat().st_size
+                        f.unlink()
+                        deleted += 1
+                    except OSError:
+                        pass
+        if deleted:
+            self.log(
+                f"Cleaned up {deleted} capture files ({freed / (1024*1024):.1f} MB freed)",
+                "OK",
+            )
+
     def run(self) -> int:
         """Run the sequence. Returns 0 on success."""
         enabled_scripts = [s for s in self.scripts if s.get("enabled", True)]
@@ -190,6 +216,9 @@ class SequenceRunner:
                     if self._running and i < len(enabled_scripts) - 1 and self.script_delay > 0:
                         self.log(f"Waiting {self.script_delay}s before next script...", "INFO")
                         time.sleep(self.script_delay)
+
+                # Clean up capture images after each loop to prevent disk full
+                self._cleanup_captures()
 
                 if not self.loop:
                     break

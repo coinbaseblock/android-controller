@@ -6436,39 +6436,46 @@ class EditorHandler(BaseHTTPRequestHandler):
     def _disk_space(self) -> dict:
         """Return disk usage info with detailed breakdown.
 
-        Uses the root filesystem (``/``) for the overall disk gauge so that
-        the numbers are meaningful even when ``/work`` lives on a tiny tmpfs
-        overlay.  Falls back to ``/work`` only when ``/`` is unavailable.
+        Shows the most constrained filesystem so the user sees a warning
+        before ``No space left on device`` errors occur.  In Docker the
+        container overlay (``/``) may be much smaller than a bind-mounted
+        volume (``/work``, ``/img``).
         """
         try:
-            # Pick the largest real partition for the overall gauge.
-            # /work may be a tiny tmpfs; / is usually the container root.
-            root_usage = shutil.disk_usage("/")
-            work_usage = shutil.disk_usage(self.work_dir)
-            # Use whichever partition is larger (root is almost always bigger)
-            usage = root_usage if root_usage.total >= work_usage.total else work_usage
-
-            # If /img is on a separate filesystem, add its capacity
-            img_dir = Path("/img")
-            img_on_separate_fs = False
-            if img_dir.exists():
+            # Gather usage for all relevant mount points
+            candidates = []
+            for mount in ["/", str(self.work_dir), "/img"]:
                 try:
-                    img_usage = shutil.disk_usage("/img")
-                    # Consider it separate if it differs significantly from root
-                    if abs(img_usage.total - root_usage.total) > 50 * 1024 * 1024:
-                        img_on_separate_fs = True
+                    u = shutil.disk_usage(mount)
+                    candidates.append((mount, u))
                 except OSError:
                     pass
 
-            # Aggregate total/used/free across relevant partitions
-            if img_on_separate_fs:
-                total = root_usage.total + img_usage.total
-                used = root_usage.used + img_usage.used
-                free = root_usage.free + img_usage.free
-            else:
-                total = usage.total
-                used = usage.used
-                free = usage.free
+            if not candidates:
+                return {"ok": False, "error": "Cannot read any filesystem"}
+
+            # De-duplicate partitions that report the same total (same fs)
+            seen_totals: dict[int, tuple] = {}
+            for mount, u in candidates:
+                key = u.total
+                # If we already saw this total, keep the one with less free
+                # space (more constrained) – or just skip
+                if key not in seen_totals or u.free < seen_totals[key][1].free:
+                    seen_totals[key] = (mount, u)
+
+            unique_parts = list(seen_totals.values())
+
+            # Pick the most constrained partition (least free space) for
+            # the headline gauge – this is the one that will hit "disk full"
+            # first.
+            unique_parts.sort(key=lambda x: x[1].free)
+            _primary_mount, primary = unique_parts[0]
+
+            total = primary.total
+            used = primary.used
+            free = primary.free
+
+            img_dir = Path("/img")
 
             log_dir = Path(self.work_dir) / "logs"
             log_size, log_count = self._dir_size(log_dir)
@@ -6760,10 +6767,20 @@ class EditorHandler(BaseHTTPRequestHandler):
 
         Returns cleanup result dict if cleanup was performed, None if not needed.
         Designed to be called before playback or periodically.
+        Checks ALL relevant filesystems (overlay, /work, /img) and triggers
+        cleanup based on the most constrained one.
         """
         try:
-            usage = shutil.disk_usage(self.work_dir)
-            used_pct = usage.used / usage.total * 100
+            # Check all relevant mount points, use the most constrained
+            used_pct = 0.0
+            for mount in ["/", str(self.work_dir), "/img"]:
+                try:
+                    u = shutil.disk_usage(mount)
+                    pct = u.used / u.total * 100 if u.total else 0
+                    if pct > used_pct:
+                        used_pct = pct
+                except OSError:
+                    pass
             if used_pct <= threshold_pct:
                 return None
 
