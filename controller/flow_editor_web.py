@@ -6123,10 +6123,15 @@ class EditorHandler(BaseHTTPRequestHandler):
             "CC (กระแสสูงสุด 200A)", "DC CCS COMBO 2", "AC Type 2",
             "พร้อมใช้งาน", "มีผู้ใช้งาน", "นอกเวลาทำการ", "มีการจอง",
             "กดเพื่ออัปเดตข้อมูล", "สถานีที่บันทึกไว้",
+            "Low priority", "High priority", "Medium priority",
         }
         skip_substrings = ("ถ.", "แขวง", "เขต", "กม.", "รหัส", "หมายเหตุ",
                            "kWh", "ชั่วโมง", "สูงสุด", "อัตราค่า",
                            "ข้อมูลล่าสุด")
+        # Keywords that positively identify station names – if present,
+        # bypass the skip_substrings filter (e.g. station names containing "กม.")
+        station_keywords = ("สเตชั่น", "สถานี", "เอ็นจีวี", "พีทีที",
+                            "เซนเตอร์", "แกรนด์")
 
         # Regex to detect time-range strings like "05:00 - 23:59 น."
         _time_range_re = _re.compile(r"\d{1,2}:\d{2}\s*-\s*\d{1,2}:\d{2}")
@@ -6149,7 +6154,8 @@ class EditorHandler(BaseHTTPRequestHandler):
                 continue
             if text in skip:
                 continue
-            if any(sub in text for sub in skip_substrings):
+            has_station_kw = any(kw in text for kw in station_keywords)
+            if not has_station_kw and any(sub in text for sub in skip_substrings):
                 continue
             # Skip time-range strings (e.g. "05:00 - 23:59 น.")
             if _time_range_re.search(text):
