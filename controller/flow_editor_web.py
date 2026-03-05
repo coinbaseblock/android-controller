@@ -5119,6 +5119,9 @@ td.status-cell{text-align:center}
 .export-btn:hover{background:#2ea043}
 .export-btn:disabled{background:#21262d;border-color:#30363d;color:#484f58;cursor:not-allowed}
 .export-info{font-size:11px;color:#8b949e;margin-left:4px}
+.legend{display:flex;gap:10px;align-items:center;font-size:12px;color:#8b949e}
+.legend-title{font-weight:600;color:#c9d1d9;margin-right:2px}
+.legend .status-badge{font-size:11px;padding:2px 8px}
 </style>
 </head>
 <body>
@@ -5137,8 +5140,15 @@ td.status-cell{text-align:center}
     Auto-refresh (30s)
   </label>
   <span id="lastUpdate" style="font-size:12px;color:#8b949e"></span>
+  <div class="legend">
+    <span class="legend-title">สถานะ:</span>
+    <span class="status-badge status-available">พร้อมใช้งาน</span>
+    <span class="status-badge status-inuse">มีผู้ใช้งาน</span>
+    <span class="status-badge status-booked">มีการจอง</span>
+    <span class="status-badge status-closed">นอกเวลาทำการ</span>
+  </div>
   <span style="flex:1"></span>
-  <button class="export-btn" id="exportBtn" disabled onclick="exportCSV()">📥 Export CSV</button>
+  <button class="export-btn" id="exportBtn" disabled onclick="exportHTML()">📥 Export HTML</button>
   <span class="export-info" id="exportInfo"></span>
 </div>
 <div class="container">
@@ -5376,26 +5386,43 @@ function updateExportButton(data) {
   }
 }
 
-function exportCSV() {
+function statusColor(s) {
+  if (!s) return {bg:'#f0f0f0',fg:'#999999',border:'#cccccc'};
+  if (s === 'พร้อมใช้งาน') return {bg:'#d4edda',fg:'#155724',border:'#28a745'};
+  if (s === 'มีผู้ใช้งาน') return {bg:'#f8d7da',fg:'#721c24',border:'#dc3545'};
+  if (s === 'มีการจอง') return {bg:'#fff3cd',fg:'#856404',border:'#ffc107'};
+  if (s === 'นอกเวลาทำการ') return {bg:'#e2e3e5',fg:'#383d41',border:'#6c757d'};
+  return {bg:'#f0f0f0',fg:'#999999',border:'#cccccc'};
+}
+
+function exportHTML() {
   if (!lastData) return;
   const { complete } = getCompleteRoundCount(lastData);
   if (complete === 0) return;
 
   const stations = lastData.stations || [];
-  // Build UTF-8 with BOM at byte level so spreadsheet apps (Excel/WPS)
-  // detect Thai text correctly instead of decoding as ANSI.
-  const UTF8_BOM = new Uint8Array([0xEF, 0xBB, 0xBF]);
-  const rows = [];
 
-  // Header row
-  const header = ['สถานี', 'เครื่องชาร์จ', 'หัวจ่าย', 'ประเภท', 'กำลังไฟ', 'อัตราค่าบริการ'];
-  for (let i = 1; i <= complete; i++) header.push('รอบ ' + i);
-  rows.push(header);
+  // Build HTML table with inline styles for color support in Excel/WPS
+  let html = '<!DOCTYPE html>\n<html lang="th">\n<head><meta charset="UTF-8"><title>Charger Status</title></head>\n<body>\n';
+  html += '<style>table{border-collapse:collapse;font-family:sans-serif;font-size:13px}th,td{border:1px solid #ccc;padding:6px 10px;white-space:nowrap}th{background:#f2f2f2;font-weight:bold;text-align:center}.legend{margin:10px 0;font-size:13px}.legend span{display:inline-block;padding:3px 10px;border-radius:4px;margin-right:8px;font-weight:600}</style>\n';
+
+  // Legend
+  html += '<div class="legend"><b>สถานะ: </b>';
+  html += '<span style="background:#d4edda;color:#155724;border:1px solid #28a745">พร้อมใช้งาน</span>';
+  html += '<span style="background:#f8d7da;color:#721c24;border:1px solid #dc3545">มีผู้ใช้งาน</span>';
+  html += '<span style="background:#fff3cd;color:#856404;border:1px solid #ffc107">มีการจอง</span>';
+  html += '<span style="background:#e2e3e5;color:#383d41;border:1px solid #6c757d">นอกเวลาทำการ</span>';
+  html += '</div>\n';
+
+  html += '<table>\n<thead><tr>';
+  const headers = ['สถานี', 'เครื่องชาร์จ', 'หัวจ่าย', 'ประเภท', 'กำลังไฟ', 'อัตราค่าบริการ'];
+  for (const h of headers) html += '<th>' + h + '</th>';
+  for (let i = 1; i <= complete; i++) html += '<th>รอบ ' + i + '</th>';
+  html += '</tr></thead>\n<tbody>\n';
 
   for (const station of stations) {
     const rounds = (station.rounds || []).filter(r => r.loop >= 1 && r.loop <= complete);
 
-    // Collect unique connectors in order
     const connectorKeys = [];
     const connectorMap = {};
     for (const round of station.rounds) {
@@ -5408,7 +5435,6 @@ function exportCSV() {
       }
     }
 
-    // Build round lookup by loop number
     const roundByLoop = {};
     for (const r of rounds) {
       if (!roundByLoop[r.loop]) roundByLoop[r.loop] = {};
@@ -5419,36 +5445,32 @@ function exportCSV() {
 
     for (const k of connectorKeys) {
       const conn = connectorMap[k];
-      const row = [
-        station.name,
-        conn.charger_id,
-        conn.connector,
-        conn.type || '',
-        conn.max_power || '',
-        conn.rate || ''
-      ];
+      html += '<tr>';
+      html += '<td>' + (station.name || '') + '</td>';
+      html += '<td style="text-align:center">' + (conn.charger_id || '') + '</td>';
+      html += '<td>' + (conn.connector || '') + '</td>';
+      html += '<td>' + (conn.type || '') + '</td>';
+      html += '<td>' + (conn.max_power || '') + '</td>';
+      html += '<td>' + (conn.rate || '') + '</td>';
       for (let i = 1; i <= complete; i++) {
-        row.push((roundByLoop[i] && roundByLoop[i][k]) || '');
+        const s = (roundByLoop[i] && roundByLoop[i][k]) || '';
+        const c = statusColor(s);
+        html += '<td style="text-align:center;background:' + c.bg + ';color:' + c.fg + ';font-weight:600">' + (s || '–') + '</td>';
       }
-      rows.push(row);
+      html += '</tr>\n';
     }
   }
 
-  // Build CSV string
-  const csv = rows.map(r => r.map(cell => {
-    const s = String(cell).replace(/"/g, '""');
-    return '"' + s + '"';
-  }).join(',')).join('\r\n');
+  html += '</tbody>\n</table>\n</body>\n</html>';
 
-  // Download
-  const csvBytes = new TextEncoder().encode(csv);
-  const blob = new Blob([UTF8_BOM, csvBytes], { type: 'text/csv;charset=utf-8' });
+  // Download as .html (Excel/WPS can open HTML tables directly with colors)
+  const blob = new Blob([html], { type: 'text/html;charset=utf-8' });
   const url = URL.createObjectURL(blob);
   const a = document.createElement('a');
   a.href = url;
   const now = new Date();
   const ts = now.getFullYear() + ('0'+(now.getMonth()+1)).slice(-2) + ('0'+now.getDate()).slice(-2) + '_' + ('0'+now.getHours()).slice(-2) + ('0'+now.getMinutes()).slice(-2);
-  a.download = 'charger_status_' + ts + '_' + complete + 'rounds.csv';
+  a.download = 'charger_status_' + ts + '_' + complete + 'rounds.html';
   document.body.appendChild(a);
   a.click();
   document.body.removeChild(a);
