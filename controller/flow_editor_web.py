@@ -5047,6 +5047,10 @@ td.status-cell{text-align:center}
 .summary-card .num{font-size:24px;font-weight:700;color:#58a6ff}
 .summary-card .label{font-size:11px;color:#8b949e;margin-top:2px}
 .loading{text-align:center;padding:60px;color:#8b949e}
+.export-btn{background:#1a7f37;border:1px solid #2ea043;color:#fff;padding:5px 14px;border-radius:6px;cursor:pointer;font-size:13px;font-weight:600}
+.export-btn:hover{background:#2ea043}
+.export-btn:disabled{background:#21262d;border-color:#30363d;color:#484f58;cursor:not-allowed}
+.export-info{font-size:11px;color:#8b949e;margin-left:4px}
 </style>
 </head>
 <body>
@@ -5065,6 +5069,9 @@ td.status-cell{text-align:center}
     Auto-refresh (30s)
   </label>
   <span id="lastUpdate" style="font-size:12px;color:#8b949e"></span>
+  <span style="flex:1"></span>
+  <button class="export-btn" id="exportBtn" disabled onclick="exportCSV()">📥 Export CSV</button>
+  <span class="export-info" id="exportInfo"></span>
 </div>
 <div class="container">
   <div id="summaryArea"></div>
@@ -5073,6 +5080,7 @@ td.status-cell{text-align:center}
 
 <script>
 let refreshTimer = null;
+let lastData = null;  // store for export
 
 function statusClass(s) {
   if (!s) return 'status-unknown';
@@ -5098,7 +5106,9 @@ async function loadData() {
   try {
     const res = await fetch('/api/charger-data');
     const data = await res.json();
+    lastData = data;
     render(data);
+    updateExportButton(data);
     document.getElementById('lastUpdate').textContent = 'Updated: ' + new Date().toLocaleTimeString();
   } catch(e) {
     document.getElementById('mainArea').innerHTML = '<div class="empty-state"><div class="icon">⚠️</div><p>Error loading data: ' + e.message + '</p></div>';
@@ -5244,6 +5254,134 @@ function toggleAutoRefresh() {
     clearInterval(refreshTimer);
     refreshTimer = null;
   }
+}
+
+function getCompleteRoundCount(data) {
+  // A "complete round" = a loop number that ALL stations have data for.
+  // Find the max loop across all stations, then find the highest loop N
+  // such that every station has data for loops 1..N.
+  const stations = data.stations || [];
+  if (!stations.length) return { complete: 0, total: 0 };
+
+  // Collect loop numbers per station
+  const stationLoops = stations.map(s => {
+    const loops = new Set();
+    (s.rounds || []).forEach(r => loops.add(r.loop));
+    return loops;
+  });
+
+  // Find max loop across all stations
+  let maxLoop = 0;
+  stationLoops.forEach(loops => loops.forEach(l => { if (l > maxLoop) maxLoop = l; }));
+
+  // Find highest complete loop: every station must have this loop
+  let completeCount = 0;
+  for (let l = 1; l <= maxLoop; l++) {
+    const allHave = stationLoops.every(loops => loops.has(l));
+    if (allHave) completeCount = l;
+    else break;  // once a gap is found, stop
+  }
+
+  return { complete: completeCount, total: maxLoop };
+}
+
+function updateExportButton(data) {
+  const btn = document.getElementById('exportBtn');
+  const info = document.getElementById('exportInfo');
+  const { complete, total } = getCompleteRoundCount(data);
+
+  if (complete === 0) {
+    btn.disabled = true;
+    info.textContent = total > 0
+      ? 'ยังไม่ครบรอบ (มี ' + total + ' รอบแต่ยังไม่สมบูรณ์)'
+      : 'ไม่มีข้อมูลรอบ';
+    info.style.color = '#d29922';
+  } else {
+    btn.disabled = false;
+    if (complete < total) {
+      info.textContent = 'จะ export ' + complete + ' รอบ (จากทั้งหมด ' + total + ' รอบ, เศษไม่รวม)';
+      info.style.color = '#d29922';
+    } else {
+      info.textContent = complete + ' รอบ พร้อม export';
+      info.style.color = '#3fb950';
+    }
+  }
+}
+
+function exportCSV() {
+  if (!lastData) return;
+  const { complete } = getCompleteRoundCount(lastData);
+  if (complete === 0) return;
+
+  const stations = lastData.stations || [];
+  const BOM = '\uFEFF';  // UTF-8 BOM for Excel Thai support
+  const rows = [];
+
+  // Header row
+  const header = ['สถานี', 'เครื่องชาร์จ', 'หัวจ่าย', 'ประเภท', 'กำลังไฟ', 'อัตราค่าบริการ'];
+  for (let i = 1; i <= complete; i++) header.push('รอบ ' + i);
+  rows.push(header);
+
+  for (const station of stations) {
+    const rounds = (station.rounds || []).filter(r => r.loop >= 1 && r.loop <= complete);
+
+    // Collect unique connectors in order
+    const connectorKeys = [];
+    const connectorMap = {};
+    for (const round of station.rounds) {
+      for (const c of round.connectors) {
+        const k = c.charger_id + '::' + c.connector;
+        if (!connectorMap[k]) {
+          connectorMap[k] = c;
+          connectorKeys.push(k);
+        }
+      }
+    }
+
+    // Build round lookup by loop number
+    const roundByLoop = {};
+    for (const r of rounds) {
+      if (!roundByLoop[r.loop]) roundByLoop[r.loop] = {};
+      for (const c of r.connectors) {
+        roundByLoop[r.loop][c.charger_id + '::' + c.connector] = c.status;
+      }
+    }
+
+    for (const k of connectorKeys) {
+      const conn = connectorMap[k];
+      const row = [
+        station.name,
+        conn.charger_id,
+        conn.connector,
+        conn.type || '',
+        conn.max_power || '',
+        conn.rate || ''
+      ];
+      for (let i = 1; i <= complete; i++) {
+        row.push((roundByLoop[i] && roundByLoop[i][k]) || '');
+      }
+      rows.push(row);
+    }
+  }
+
+  // Build CSV string
+  const csv = BOM + rows.map(r => r.map(cell => {
+    const s = String(cell).replace(/"/g, '""');
+    return '"' + s + '"';
+  }).join(',')).join('\r\n');
+
+  // Download
+  const blob = new Blob([csv], { type: 'text/csv;charset=utf-8' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  const now = new Date();
+  const ts = now.getFullYear() + ('0'+(now.getMonth()+1)).slice(-2) + ('0'+now.getDate()).slice(-2) + '_' + ('0'+now.getHours()).slice(-2) + ('0'+now.getMinutes()).slice(-2);
+  a.download = 'charger_status_' + ts + '_' + complete + 'rounds.csv';
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
 }
 
 loadData();
