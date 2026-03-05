@@ -6125,7 +6125,13 @@ class EditorHandler(BaseHTTPRequestHandler):
             "กดเพื่ออัปเดตข้อมูล", "สถานีที่บันทึกไว้",
         }
         skip_substrings = ("ถ.", "แขวง", "เขต", "กม.", "รหัส", "หมายเหตุ",
-                           "kWh", "ชั่วโมง", "สูงสุด", "อัตราค่า")
+                           "kWh", "ชั่วโมง", "สูงสุด", "อัตราค่า",
+                           "ข้อมูลล่าสุด")
+
+        # Regex to detect time-range strings like "05:00 - 23:59 น."
+        _time_range_re = _re.compile(r"\d{1,2}:\d{2}\s*-\s*\d{1,2}:\d{2}")
+        # Regex to detect standalone time references like "ณ 16:02 น."
+        _time_ref_re = _re.compile(r"ณ\s*\d{1,2}:\d{2}")
 
         # Find the Y of the topmost charger ID marker as an upper bound
         charger_y = None
@@ -6144,6 +6150,12 @@ class EditorHandler(BaseHTTPRequestHandler):
             if text in skip:
                 continue
             if any(sub in text for sub in skip_substrings):
+                continue
+            # Skip time-range strings (e.g. "05:00 - 23:59 น.")
+            if _time_range_re.search(text):
+                continue
+            # Skip time-reference strings (e.g. "ข้อมูลล่าสุด ณ 16:02 น.")
+            if _time_ref_re.search(text):
                 continue
             # Must be above the first charger ID marker
             if charger_y is not None and cy >= charger_y:
@@ -6221,13 +6233,16 @@ class EditorHandler(BaseHTTPRequestHandler):
                     status = s["text"]
                     break
 
-            # Connector side name just below (within 80 px)
+            # Connector side name on same row or just below (within 80 px)
             connector = None
+            best_side_dist = float("inf")
             for side in side_elems:
                 gap = side["center"][1] - te_y
-                if 0 < gap <= 80:
-                    connector = side["text"]
-                    break
+                if -30 <= gap <= 80:
+                    dist = abs(gap)
+                    if dist < best_side_dist:
+                        best_side_dist = dist
+                        connector = side["text"]
 
             # Rate/power spec below (within 200 px)
             max_power = rate = ""
