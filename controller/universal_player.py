@@ -577,7 +577,7 @@ class UniversalPlayer:
         elements = parse_all_elements(xml_str)
 
         result: Dict[str, Any] = {
-            "timestamp": datetime.now().isoformat(),
+            "timestamp": datetime.now().astimezone().isoformat(),
             "loop": loop_idx,
             "step": idx,
             "label": label,

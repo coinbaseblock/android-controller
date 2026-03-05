@@ -190,7 +190,7 @@ class AutomationEngine:
     def _run_one_loop(self, loop_idx: int) -> LoopResult:
         result = LoopResult(
             loop_index=loop_idx,
-            started_at=datetime.now().isoformat(),
+            started_at=datetime.now().astimezone().isoformat(),
         )
 
         for step_idx, step in enumerate(self.config.steps):
@@ -227,7 +227,7 @@ class AutomationEngine:
                 if not retried and not result.success:
                     break
 
-        result.finished_at = datetime.now().isoformat()
+        result.finished_at = datetime.now().astimezone().isoformat()
         return result
 
     def _execute_step(self, step: FlowStep, step_idx: int, loop_idx: int) -> StepResult:
@@ -237,7 +237,7 @@ class AutomationEngine:
             action=step.action,
             description=step.description,
             success=False,
-            timestamp=datetime.now().isoformat(),
+            timestamp=datetime.now().astimezone().isoformat(),
         )
 
         if self.dry_run:
