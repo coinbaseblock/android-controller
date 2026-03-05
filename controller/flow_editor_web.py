@@ -5169,25 +5169,29 @@ function statusClass(s) {
   return 'status-unknown';
 }
 
-function toThai(ts) {
-  if (!ts) return null;
-  const d = new Date(ts);
-  if (isNaN(d)) return null;
-  return new Date(d.toLocaleString('en-US', { timeZone: 'Asia/Bangkok' }));
-}
-
 function fmtTime(ts) {
   if (!ts) return '';
-  const d = toThai(ts);
-  if (!d) return '';
-  return ('0'+d.getHours()).slice(-2) + ':' + ('0'+d.getMinutes()).slice(-2);
+  const d = new Date(ts);
+  if (isNaN(d)) return '';
+  // Format directly in Bangkok timezone using 24-hour format
+  return d.toLocaleString('en-GB', { timeZone: 'Asia/Bangkok', hour: '2-digit', minute: '2-digit', hour12: false });
 }
 
 function fmtDate(ts) {
   if (!ts) return '';
-  const d = toThai(ts);
-  if (!d) return '';
-  return d.getFullYear() + '-' + ('0'+(d.getMonth()+1)).slice(-2) + '-' + ('0'+d.getDate()).slice(-2);
+  const d = new Date(ts);
+  if (isNaN(d)) return '';
+  // Format date in Bangkok timezone as YYYY-MM-DD
+  const parts = d.toLocaleDateString('en-CA', { timeZone: 'Asia/Bangkok' }).split('-');
+  return parts.join('-');
+}
+
+function fmtTimeRange(tsStart, tsEnd) {
+  const t1 = fmtTime(tsStart);
+  const t2 = fmtTime(tsEnd);
+  if (!t1) return '';
+  if (!t2 || t1 === t2) return t1;
+  return t1 + '-' + t2;
 }
 
 async function loadData() {
@@ -5197,7 +5201,7 @@ async function loadData() {
     lastData = data;
     render(data);
     updateExportButton(data);
-    document.getElementById('lastUpdate').textContent = 'Updated: ' + new Date().toLocaleTimeString('en-GB', { timeZone: 'Asia/Bangkok', hour: '2-digit', minute: '2-digit', second: '2-digit' });
+    document.getElementById('lastUpdate').textContent = 'Updated: ' + new Date().toLocaleTimeString('en-GB', { timeZone: 'Asia/Bangkok', hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false });
   } catch(e) {
     document.getElementById('mainArea').innerHTML = '<div class="empty-state"><div class="icon">⚠️</div><p>Error loading data: ' + e.message + '</p></div>';
   }
@@ -5271,7 +5275,7 @@ function render(data) {
     const roundCols = uniqueRounds.map((r, i) => `
       <th class="round-col">
         <div class="round-header">รอบ ${r.loop || (i+1)}</div>
-        <div class="round-time">${fmtTime(r.timestamp)}</div>
+        <div class="round-time">${fmtTimeRange(r.timestamp, r.timestamp_end)}</div>
         <div class="round-time" style="color:#6e7681">${fmtDate(r.timestamp)}</div>
         <div class="round-time" style="color:#484f58">${r.connectors.length} หัวจ่าย</div>
       </th>`).join('');
@@ -5412,14 +5416,14 @@ function exportHTML() {
 
   const stations = lastData.stations || [];
 
-  // Build loop -> timestamp from the first available station round.
+  // Build loop -> {start, end} timestamps from the first available station round.
   // This keeps exported columns aligned with source capture timing.
   const loopTimestamps = {};
   for (const station of stations) {
     for (const round of (station.rounds || [])) {
       if (!round || !round.loop || round.loop < 1 || round.loop > complete) continue;
       if (!loopTimestamps[round.loop] && round.timestamp) {
-        loopTimestamps[round.loop] = round.timestamp;
+        loopTimestamps[round.loop] = { start: round.timestamp, end: round.timestamp_end || round.timestamp };
       }
     }
   }
@@ -5439,12 +5443,16 @@ function exportHTML() {
   html += '<table>\n<thead><tr>';
   const headers = ['สถานี', 'เครื่องชาร์จ', 'หัวจ่าย', 'ประเภท', 'กำลังไฟ', 'อัตราค่าบริการ'];
   for (const h of headers) html += '<th rowspan="2">' + h + '</th>';
-  for (let i = 1; i <= complete; i++) html += '<th>รอบ ' + i + '</th>';
+  for (let i = 1; i <= complete; i++) {
+    const lt = loopTimestamps[i];
+    const timeRange = lt ? fmtTimeRange(lt.start, lt.end) : '';
+    html += '<th>รอบ ' + i + (timeRange ? '<br><span style="font-size:11px;font-weight:500;color:#666">' + timeRange + '</span>' : '') + '</th>';
+  }
   html += '</tr><tr>';
   for (let i = 1; i <= complete; i++) {
-    const ts = loopTimestamps[i];
-    const timeLabel = ts ? (fmtDate(ts) + ' ' + fmtTime(ts)).trim() : '-';
-    html += '<th style="font-size:11px;color:#666;font-weight:500">' + timeLabel + '</th>';
+    const lt = loopTimestamps[i];
+    const dateLabel = lt ? fmtDate(lt.start) : '-';
+    html += '<th style="font-size:11px;color:#666;font-weight:500">' + dateLabel + '</th>';
   }
   html += '</tr></thead>\n<tbody>\n';
 
@@ -5496,8 +5504,8 @@ function exportHTML() {
   const url = URL.createObjectURL(blob);
   const a = document.createElement('a');
   a.href = url;
-  const now = toThai(new Date().toISOString());
-  const ts = now.getFullYear() + ('0'+(now.getMonth()+1)).slice(-2) + ('0'+now.getDate()).slice(-2) + '_' + ('0'+now.getHours()).slice(-2) + ('0'+now.getMinutes()).slice(-2);
+  const nowISO = new Date().toISOString();
+  const ts = fmtDate(nowISO).replace(/-/g, '') + '_' + fmtTime(nowISO).replace(':', '');
   a.download = 'charger_status_' + ts + '_' + complete + 'rounds.html';
   document.body.appendChild(a);
   a.click();
@@ -6326,6 +6334,7 @@ class EditorHandler(BaseHTTPRequestHandler):
                                 # First entry for this loop – create the round
                                 sdata["loop_data"][loop_num] = {
                                     "timestamp": ts,
+                                    "timestamp_end": ts,
                                     "label": label,
                                     "loop": loop_num,
                                     "step": entry.get("step", 0),
@@ -6333,9 +6342,11 @@ class EditorHandler(BaseHTTPRequestHandler):
                                 }
 
                             merged = sdata["loop_data"][loop_num]
-                            # Use the earliest timestamp for the round header
+                            # Use the earliest timestamp for start, latest for end
                             if ts < merged["timestamp"]:
                                 merged["timestamp"] = ts
+                            if ts > merged["timestamp_end"]:
+                                merged["timestamp_end"] = ts
 
                             # Merge connectors – later captures within the same loop
                             # can add new connectors or update existing ones
@@ -6354,6 +6365,7 @@ class EditorHandler(BaseHTTPRequestHandler):
                 merged = sdata["loop_data"][loop_num]
                 rounds.append({
                     "timestamp": merged["timestamp"],
+                    "timestamp_end": merged["timestamp_end"],
                     "label": merged["label"],
                     "loop": merged["loop"],
                     "step": merged["step"],
