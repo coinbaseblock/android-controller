@@ -1104,10 +1104,15 @@ input:focus, select:focus, textarea:focus { outline: none; border-color: var(--b
             </div>
             <div id="diskCategoryActions" style="display:none;margin-top:6px;font-size:10px">
               <div class="btn-group" style="gap:3px;flex-wrap:wrap">
-                <button class="btn btn-sm" onclick="deleteAllCaptures()" title="Delete all capture screenshots" style="font-size:10px;padding:1px 6px">Del Captures</button>
-                <button class="btn btn-sm" onclick="deleteAllSent()" title="Delete all sent images" style="font-size:10px;padding:1px 6px">Del Sent</button>
+                <button class="btn btn-sm" onclick="deleteAllCaptures()" title="Delete all capture screenshots (archives to PC first)" style="font-size:10px;padding:1px 6px">Del Captures</button>
+                <button class="btn btn-sm" onclick="deleteAllSent()" title="Delete all sent images (archives to PC first)" style="font-size:10px;padding:1px 6px">Del Sent</button>
                 <button class="btn btn-sm" onclick="clearAllLogs()" title="Delete all log files" style="font-size:10px;padding:1px 6px">Del Logs</button>
+                <button class="btn btn-sm btn-danger" onclick="deleteAllArchive()" title="Delete all archived images from PC" style="font-size:10px;padding:1px 6px">Del Archive</button>
               </div>
+            </div>
+            <div style="margin-top:6px">
+              <button class="btn btn-sm btn-primary" onclick="window.open('/gallery','_blank')" title="Open image gallery to view archived screenshots" style="font-size:11px">Open Gallery</button>
+              <span id="archiveInfo" style="font-size:10px;color:var(--text2);margin-left:6px"></span>
             </div>
           </div>
           <!-- Station Data Viewer -->
@@ -2802,10 +2807,14 @@ async function refreshDiskSpace() {
       const parts = [];
       if (b.captures_count > 0) parts.push('Captures: ' + b.captures_mb + ' MB (' + b.captures_count + ')');
       if (b.sent_count > 0) parts.push('Sent: ' + b.sent_mb + ' MB (' + b.sent_count + ')');
+      if (b.archive_count > 0) parts.push('Archive(PC): ' + b.archive_mb + ' MB (' + b.archive_count + ')');
       if (b.img_total_count > 0) parts.push('Img total: ' + b.img_total_mb + ' MB');
       if (b.urf_count > 0) parts.push('Recordings: ' + b.urf_mb + ' MB (' + b.urf_count + ')');
       if (b.pycache_count > 0) parts.push('Cache: ' + b.pycache_mb + ' MB');
       if (b.tmp_count > 0) parts.push('Temp: ' + b.tmp_mb + ' MB');
+      // Update archive info badge
+      const arcInfo = document.getElementById('archiveInfo');
+      if (arcInfo) arcInfo.textContent = b.archive_count > 0 ? b.archive_count + ' saved (' + b.archive_mb + ' MB)' : '';
       if (parts.length > 0) {
         bd.innerHTML = parts.join(' | ');
         bd.style.display = '';
@@ -2822,15 +2831,17 @@ setTimeout(() => refreshDiskSpace(), 1500);
 setInterval(() => refreshDiskSpace(), _lastDiskPct > 80 ? 30000 : 60000);
 
 async function deepClean() {
-  if (!confirm('Deep Clean: Delete ALL captures, sent images, logs, cache, and temp files?\\nThis will free maximum disk space but cannot be undone.')) return;
+  if (!confirm('Deep Clean: Delete ALL captures, sent images, logs, cache, and temp files?\\nImages will be archived to PC first.')) return;
   try {
-    toast('Deep cleaning...', 'info');
+    toast('Archiving images & deep cleaning...', 'info');
     const res = await api('POST', '/deep-clean', {});
     if (res.ok) {
       let msg = 'Deep clean complete! Deleted ' + res.deleted + ' files, freed ' + res.freed_mb + ' MB';
       if (res.details) {
         const d = res.details;
         const parts = [];
+        const arc = (d.archived_captures||0) + (d.archived_sent||0);
+        if (arc > 0) parts.push(arc + ' archived to PC');
         if (d.logs > 0) parts.push(d.logs + ' logs');
         if (d.captures > 0) parts.push(d.captures + ' captures');
         if (d.sent > 0) parts.push(d.sent + ' sent imgs');
@@ -2850,15 +2861,17 @@ async function deepClean() {
 }
 
 async function smartClean() {
-  if (!confirm('Smart Clean: Delete captures, sent images, and logs older than 6 hours?\\nRecent files will be kept.')) return;
+  if (!confirm('Smart Clean: Delete captures, sent images, and logs older than 6 hours?\\nImages will be archived to PC first. Recent files will be kept.')) return;
   try {
-    toast('Smart cleaning (keeping files < 6h old)...', 'info');
+    toast('Archiving images & smart cleaning (keeping files < 6h old)...', 'info');
     const res = await api('POST', '/smart-clean', { keep_hours: 6 });
     if (res.ok) {
       let msg = 'Smart clean done! Deleted ' + res.deleted + ' files, freed ' + res.freed_mb + ' MB';
       if (res.details) {
         const d = res.details;
         const parts = [];
+        const arc = (d.archived_captures||0) + (d.archived_sent||0);
+        if (arc > 0) parts.push(arc + ' archived to PC');
         if (d.logs > 0) parts.push(d.logs + ' logs');
         if (d.captures > 0) parts.push(d.captures + ' captures');
         if (d.sent > 0) parts.push(d.sent + ' sent imgs');
@@ -2878,12 +2891,14 @@ async function smartClean() {
 }
 
 async function deleteAllCaptures() {
-  if (!confirm('Delete ALL capture screenshots? This cannot be undone.')) return;
+  if (!confirm('Delete ALL capture screenshots? Images will be archived to PC first.')) return;
   try {
-    toast('Deleting captures...', 'info');
+    toast('Archiving & deleting captures...', 'info');
     const res = await api('POST', '/delete-all-captures', {});
     if (res.ok) {
-      toast('Deleted ' + res.deleted + ' captures, freed ' + res.freed_mb + ' MB', 'success');
+      let msg = 'Deleted ' + res.deleted + ' captures, freed ' + res.freed_mb + ' MB';
+      if (res.archived > 0) msg += ' (archived ' + res.archived + ' to PC)';
+      toast(msg, 'success');
     } else {
       toast('Error: ' + (res.error || 'unknown'), 'error');
     }
@@ -2892,12 +2907,28 @@ async function deleteAllCaptures() {
 }
 
 async function deleteAllSent() {
-  if (!confirm('Delete ALL sent images? This cannot be undone.')) return;
+  if (!confirm('Delete ALL sent images? Images will be archived to PC first.')) return;
   try {
-    toast('Deleting sent images...', 'info');
+    toast('Archiving & deleting sent images...', 'info');
     const res = await api('POST', '/delete-all-sent', {});
     if (res.ok) {
-      toast('Deleted ' + res.deleted + ' sent images, freed ' + res.freed_mb + ' MB', 'success');
+      let msg = 'Deleted ' + res.deleted + ' sent images, freed ' + res.freed_mb + ' MB';
+      if (res.archived > 0) msg += ' (archived ' + res.archived + ' to PC)';
+      toast(msg, 'success');
+    } else {
+      toast('Error: ' + (res.error || 'unknown'), 'error');
+    }
+    refreshDiskSpace();
+  } catch (e) { toast('Error: ' + e.message, 'error'); }
+}
+
+async function deleteAllArchive() {
+  if (!confirm('Delete ALL archived images from PC? This cannot be undone.')) return;
+  try {
+    toast('Deleting archive...', 'info');
+    const res = await api('POST', '/delete-all-archive', {});
+    if (res.ok) {
+      toast('Deleted ' + res.deleted + ' archive images, freed ' + res.freed_mb + ' MB', 'success');
     } else {
       toast('Error: ' + (res.error || 'unknown'), 'error');
     }
@@ -5253,6 +5284,286 @@ loadData();
 
 
 # ============================================================
+# Image Gallery - Browse archived screenshots saved to PC
+# ============================================================
+
+GALLERY_HTML = r"""<!DOCTYPE html>
+<html lang="th">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Image Gallery - Saved Screenshots</title>
+<style>
+:root{--bg:#0d1117;--bg2:#161b22;--bg3:#21262d;--border:#30363d;--text:#e6edf3;--text2:#8b949e;--green:#3fb950;--blue:#58a6ff;--red:#f85149;--orange:#d29922;--pink:#f778ba}
+*{margin:0;padding:0;box-sizing:border-box}
+body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif;background:var(--bg);color:var(--text);min-height:100vh}
+.header{background:var(--bg2);border-bottom:1px solid var(--border);padding:12px 20px;display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px}
+.header h1{font-size:18px;font-weight:600}
+.header .info{font-size:12px;color:var(--text2)}
+.controls{display:flex;gap:6px;align-items:center;flex-wrap:wrap}
+.btn{padding:6px 14px;border-radius:6px;border:1px solid var(--border);background:var(--bg3);color:var(--text);cursor:pointer;font-size:12px;transition:all .2s}
+.btn:hover{background:var(--border)}
+.btn-primary{background:#238636;border-color:#2ea043;color:#fff}
+.btn-primary:hover{background:#2ea043}
+.btn-danger{background:#da3633;border-color:#f85149;color:#fff}
+.btn-danger:hover{background:#f85149}
+.btn-sm{padding:3px 8px;font-size:11px}
+.filter-bar{background:var(--bg2);border-bottom:1px solid var(--border);padding:8px 20px;display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+.filter-bar input,.filter-bar select{background:var(--bg3);border:1px solid var(--border);color:var(--text);padding:4px 8px;border-radius:4px;font-size:12px}
+.filter-bar input{width:200px}
+.stats{padding:8px 20px;font-size:11px;color:var(--text2);background:var(--bg);border-bottom:1px solid var(--border)}
+.gallery{display:grid;grid-template-columns:repeat(auto-fill,minmax(240px,1fr));gap:12px;padding:16px 20px}
+.card{background:var(--bg2);border:1px solid var(--border);border-radius:8px;overflow:hidden;cursor:pointer;transition:all .2s;position:relative}
+.card:hover{border-color:var(--blue);transform:translateY(-2px);box-shadow:0 4px 12px rgba(0,0,0,.4)}
+.card img{width:100%;height:180px;object-fit:cover;display:block;background:var(--bg3)}
+.card .card-info{padding:8px 10px;font-size:11px;color:var(--text2)}
+.card .card-info .name{color:var(--text);font-weight:500;font-size:12px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.card .card-info .meta{margin-top:3px;display:flex;justify-content:space-between}
+.card .card-info .source{display:inline-block;padding:1px 5px;border-radius:3px;font-size:10px;font-weight:500}
+.card .card-info .source.captures{background:#3fb95020;color:#3fb950}
+.card .card-info .source.sent{background:#58a6ff20;color:#58a6ff}
+.card .card-info .source.other{background:#d2992220;color:#d29922}
+.card .card-check{position:absolute;top:6px;left:6px;width:20px;height:20px;border-radius:4px;border:2px solid rgba(255,255,255,.5);background:rgba(0,0,0,.4);display:none;align-items:center;justify-content:center;color:#fff;font-size:14px}
+.card.selectable .card-check{display:flex}
+.card.selected .card-check{background:var(--blue);border-color:var(--blue)}
+.empty{text-align:center;padding:60px 20px;color:var(--text2)}
+.empty h2{font-size:20px;margin-bottom:8px;color:var(--text)}
+/* Lightbox */
+.lightbox{display:none;position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,.92);z-index:1000;align-items:center;justify-content:center;flex-direction:column}
+.lightbox.active{display:flex}
+.lightbox img{max-width:95vw;max-height:85vh;object-fit:contain;border-radius:4px}
+.lightbox .lb-info{color:var(--text2);font-size:13px;margin-top:10px;text-align:center;max-width:80vw}
+.lightbox .lb-close{position:absolute;top:12px;right:16px;color:#fff;font-size:28px;cursor:pointer;opacity:.7;z-index:1001}
+.lightbox .lb-close:hover{opacity:1}
+.lightbox .lb-nav{position:absolute;top:50%;transform:translateY(-50%);font-size:36px;color:rgba(255,255,255,.6);cursor:pointer;padding:20px;user-select:none}
+.lightbox .lb-nav:hover{color:#fff}
+.lightbox .lb-prev{left:8px}
+.lightbox .lb-next{right:8px}
+.lightbox .lb-actions{margin-top:8px;display:flex;gap:6px}
+.toast{position:fixed;bottom:20px;right:20px;padding:10px 16px;border-radius:6px;font-size:13px;z-index:2000;animation:fadeIn .3s}
+.toast.success{background:#238636;color:#fff}
+.toast.error{background:#da3633;color:#fff}
+.toast.info{background:#1f6feb;color:#fff}
+@keyframes fadeIn{from{opacity:0;transform:translateY(10px)}to{opacity:1;transform:translateY(0)}}
+.tab-bar{display:flex;gap:0;background:var(--bg2);border-bottom:1px solid var(--border);padding:0 20px}
+.tab{padding:10px 16px;font-size:13px;color:var(--text2);cursor:pointer;border-bottom:2px solid transparent;transition:all .2s}
+.tab:hover{color:var(--text)}
+.tab.active{color:var(--blue);border-bottom-color:var(--blue)}
+</style>
+</head>
+<body>
+<div class="header">
+  <div>
+    <h1>Image Gallery</h1>
+    <div class="info" id="galleryInfo">Loading...</div>
+  </div>
+  <div class="controls">
+    <button class="btn" onclick="refreshGallery()">Refresh</button>
+    <button class="btn" onclick="toggleSelect()">Select Mode</button>
+    <button class="btn btn-primary" onclick="downloadSelected()" id="btnDownload" style="display:none">Download Selected</button>
+    <button class="btn btn-danger" onclick="deleteSelected()" id="btnDeleteSel" style="display:none">Delete Selected</button>
+    <button class="btn btn-danger" onclick="deleteAllArchive()">Delete All Archive</button>
+    <button class="btn" onclick="downloadArchiveZip()">Download All ZIP</button>
+    <a href="/" class="btn" style="text-decoration:none">Back to Editor</a>
+  </div>
+</div>
+<div class="tab-bar">
+  <div class="tab active" data-tab="archive" onclick="switchTab('archive')">Archive (PC Saved)</div>
+  <div class="tab" data-tab="captures" onclick="switchTab('captures')">Docker: Captures</div>
+  <div class="tab" data-tab="sent" onclick="switchTab('sent')">Docker: Sent</div>
+</div>
+<div class="filter-bar">
+  <input type="text" id="filterText" placeholder="Filter by filename..." oninput="applyFilter()">
+  <select id="filterSort" onchange="applyFilter()">
+    <option value="newest">Newest first</option>
+    <option value="oldest">Oldest first</option>
+    <option value="name">Name A-Z</option>
+    <option value="size">Largest first</option>
+  </select>
+  <span class="stats" id="filterStats"></span>
+</div>
+<div class="gallery" id="gallery"></div>
+<div class="empty" id="emptyMsg" style="display:none">
+  <h2>No images found</h2>
+  <p>Images will appear here after screenshots are archived during cleanup.</p>
+</div>
+<!-- Lightbox -->
+<div class="lightbox" id="lightbox">
+  <span class="lb-close" onclick="closeLightbox()">&times;</span>
+  <span class="lb-nav lb-prev" onclick="navLightbox(-1)">&#10094;</span>
+  <span class="lb-nav lb-next" onclick="navLightbox(1)">&#10095;</span>
+  <img id="lbImg" src="">
+  <div class="lb-info" id="lbInfo"></div>
+  <div class="lb-actions">
+    <button class="btn btn-sm" onclick="downloadCurrent()">Download</button>
+    <button class="btn btn-sm btn-danger" onclick="deleteCurrent()">Delete</button>
+  </div>
+</div>
+<script>
+let allImages = [];
+let filteredImages = [];
+let currentTab = 'archive';
+let selectMode = false;
+let selectedSet = new Set();
+let lbIndex = -1;
+
+function toast(msg, type) {
+  const t = document.createElement('div');
+  t.className = 'toast ' + (type || 'info');
+  t.textContent = msg;
+  document.body.appendChild(t);
+  setTimeout(() => t.remove(), 3000);
+}
+
+async function api(method, path, body) {
+  const opts = {method, headers:{'Content-Type':'application/json'}};
+  if (body !== undefined) opts.body = JSON.stringify(body);
+  const r = await fetch('/api' + path, opts);
+  return r.json();
+}
+
+function switchTab(tab) {
+  currentTab = tab;
+  document.querySelectorAll('.tab').forEach(t => t.classList.toggle('active', t.dataset.tab === tab));
+  selectedSet.clear();
+  refreshGallery();
+}
+
+async function refreshGallery() {
+  try {
+    const data = await api('GET', '/gallery-images?source=' + currentTab);
+    if (!data.ok) { toast('Error: ' + (data.error || 'unknown'), 'error'); return; }
+    allImages = data.images || [];
+    document.getElementById('galleryInfo').textContent =
+      data.total_count + ' images | ' + data.total_size_mb + ' MB | Source: ' + currentTab;
+    applyFilter();
+  } catch(e) { toast('Error: ' + e.message, 'error'); }
+}
+
+function applyFilter() {
+  const text = document.getElementById('filterText').value.toLowerCase();
+  const sort = document.getElementById('filterSort').value;
+  filteredImages = allImages.filter(img => !text || img.name.toLowerCase().includes(text));
+  if (sort === 'newest') filteredImages.sort((a,b) => b.mtime - a.mtime);
+  else if (sort === 'oldest') filteredImages.sort((a,b) => a.mtime - b.mtime);
+  else if (sort === 'name') filteredImages.sort((a,b) => a.name.localeCompare(b.name));
+  else if (sort === 'size') filteredImages.sort((a,b) => b.size - a.size);
+  document.getElementById('filterStats').textContent = filteredImages.length + ' of ' + allImages.length + ' shown';
+  renderGallery();
+}
+
+function renderGallery() {
+  const g = document.getElementById('gallery');
+  const empty = document.getElementById('emptyMsg');
+  if (filteredImages.length === 0) { g.innerHTML = ''; empty.style.display = ''; return; }
+  empty.style.display = 'none';
+  g.innerHTML = filteredImages.map((img, i) => {
+    const sel = selectedSet.has(img.path) ? ' selected' : '';
+    const selectable = selectMode ? ' selectable' : '';
+    const srcClass = img.source === 'captures' ? 'captures' : img.source === 'sent' ? 'sent' : 'other';
+    const sizeTxt = img.size > 1048576 ? (img.size/1048576).toFixed(1)+' MB' : (img.size/1024).toFixed(0)+' KB';
+    const dateTxt = new Date(img.mtime*1000).toLocaleString('th-TH');
+    return '<div class="card' + selectable + sel + '" onclick="cardClick(event,' + i + ')" data-idx="' + i + '">' +
+      '<div class="card-check">' + (selectedSet.has(img.path) ? '&#10003;' : '') + '</div>' +
+      '<img loading="lazy" src="/api/gallery-image?path=' + encodeURIComponent(img.path) + '&source=' + img.source + '">' +
+      '<div class="card-info"><div class="name" title="' + img.name + '">' + img.name + '</div>' +
+      '<div class="meta"><span class="source ' + srcClass + '">' + img.source + '</span><span>' + sizeTxt + '</span><span>' + dateTxt + '</span></div></div></div>';
+  }).join('');
+}
+
+function cardClick(e, idx) {
+  if (selectMode) {
+    const img = filteredImages[idx];
+    if (selectedSet.has(img.path)) selectedSet.delete(img.path); else selectedSet.add(img.path);
+    renderGallery();
+    updateSelectButtons();
+  } else {
+    openLightbox(idx);
+  }
+}
+
+function toggleSelect() {
+  selectMode = !selectMode;
+  selectedSet.clear();
+  updateSelectButtons();
+  renderGallery();
+}
+function updateSelectButtons() {
+  const n = selectedSet.size;
+  document.getElementById('btnDownload').style.display = n > 0 ? '' : 'none';
+  document.getElementById('btnDeleteSel').style.display = n > 0 ? '' : 'none';
+}
+
+function openLightbox(idx) {
+  lbIndex = idx;
+  const img = filteredImages[idx];
+  document.getElementById('lbImg').src = '/api/gallery-image?path=' + encodeURIComponent(img.path) + '&source=' + img.source;
+  const dateTxt = new Date(img.mtime*1000).toLocaleString('th-TH');
+  const sizeTxt = img.size > 1048576 ? (img.size/1048576).toFixed(1)+' MB' : (img.size/1024).toFixed(0)+' KB';
+  document.getElementById('lbInfo').textContent = img.name + ' | ' + sizeTxt + ' | ' + dateTxt + ' | ' + img.source;
+  document.getElementById('lightbox').classList.add('active');
+}
+function closeLightbox() { document.getElementById('lightbox').classList.remove('active'); }
+function navLightbox(dir) {
+  lbIndex = (lbIndex + dir + filteredImages.length) % filteredImages.length;
+  openLightbox(lbIndex);
+}
+document.addEventListener('keydown', e => {
+  if (!document.getElementById('lightbox').classList.contains('active')) return;
+  if (e.key === 'Escape') closeLightbox();
+  else if (e.key === 'ArrowLeft') navLightbox(-1);
+  else if (e.key === 'ArrowRight') navLightbox(1);
+});
+
+function downloadCurrent() {
+  if (lbIndex < 0) return;
+  const img = filteredImages[lbIndex];
+  const a = document.createElement('a');
+  a.href = '/api/gallery-image?path=' + encodeURIComponent(img.path) + '&source=' + img.source + '&download=1';
+  a.download = img.name;
+  a.click();
+}
+
+async function deleteCurrent() {
+  if (lbIndex < 0) return;
+  const img = filteredImages[lbIndex];
+  if (!confirm('Delete "' + img.name + '"?')) return;
+  const res = await api('POST', '/gallery-delete', {paths: [img.path], source: img.source});
+  if (res.ok) { toast('Deleted', 'success'); closeLightbox(); refreshGallery(); }
+  else toast('Error: ' + (res.error||'unknown'), 'error');
+}
+
+async function deleteSelected() {
+  const paths = Array.from(selectedSet);
+  if (!confirm('Delete ' + paths.length + ' selected images?')) return;
+  const res = await api('POST', '/gallery-delete', {paths, source: currentTab});
+  if (res.ok) { toast('Deleted ' + res.deleted + ' images', 'success'); selectedSet.clear(); refreshGallery(); }
+  else toast('Error: ' + (res.error||'unknown'), 'error');
+}
+
+async function downloadSelected() {
+  const paths = Array.from(selectedSet);
+  window.open('/api/gallery-download-zip?source=' + currentTab + '&paths=' + encodeURIComponent(JSON.stringify(paths)), '_blank');
+}
+
+async function deleteAllArchive() {
+  if (!confirm('Delete ALL archived images? This will remove saved images from PC.')) return;
+  const res = await api('POST', '/delete-all-archive', {});
+  if (res.ok) { toast('Deleted ' + res.deleted + ' archive images, freed ' + res.freed_mb + ' MB', 'success'); refreshGallery(); }
+  else toast('Error: ' + (res.error||'unknown'), 'error');
+}
+
+function downloadArchiveZip() {
+  window.open('/api/gallery-download-zip?source=' + currentTab, '_blank');
+}
+
+refreshGallery();
+</script>
+</body>
+</html>"""
+
+
+# ============================================================
 # HTTP Server
 # ============================================================
 
@@ -5320,6 +5631,15 @@ class EditorHandler(BaseHTTPRequestHandler):
             self._download_extract_logs_zip()
         elif path == "/api/download-station-logs":
             self._download_station_logs_zip()
+        elif path == "/gallery":
+            self._html(GALLERY_HTML)
+        elif path == "/api/gallery-images":
+            source = params.get("source", ["archive"])[0]
+            self._json(self._gallery_list_images(source))
+        elif path == "/api/gallery-image":
+            self._gallery_serve_image(params)
+        elif path == "/api/gallery-download-zip":
+            self._gallery_download_zip(params)
         else:
             self._error(404, "Not Found")
 
@@ -5381,6 +5701,10 @@ class EditorHandler(BaseHTTPRequestHandler):
             self._json(self._delete_all_captures())
         elif path == "/api/delete-all-sent":
             self._json(self._delete_all_sent())
+        elif path == "/api/delete-all-archive":
+            self._json(self._delete_all_archive())
+        elif path == "/api/gallery-delete":
+            self._json(self._gallery_delete(body))
         elif path == "/api/delete-log":
             self._json(self._delete_single_log(body))
         else:
@@ -6525,6 +6849,10 @@ class EditorHandler(BaseHTTPRequestHandler):
                     except OSError:
                         pass
 
+            # Archive (saved to PC) stats
+            archive_dir = Path("/img/archive")
+            archive_size, archive_count = self._dir_size(archive_dir)
+
             return {
                 "ok": True,
                 "total_gb": round(total / (1024**3), 2),
@@ -6540,6 +6868,8 @@ class EditorHandler(BaseHTTPRequestHandler):
                     "sent_count": sent_count,
                     "img_total_mb": round(img_size / (1024**2), 2),
                     "img_total_count": img_count,
+                    "archive_mb": round(archive_size / (1024**2), 2),
+                    "archive_count": archive_count,
                     "urf_mb": round(urf_size / (1024**2), 2),
                     "urf_count": urf_count,
                     "pycache_mb": round(pycache_size / (1024**2), 2),
@@ -6552,11 +6882,21 @@ class EditorHandler(BaseHTTPRequestHandler):
             return {"ok": False, "error": str(e)}
 
     def _deep_clean(self) -> dict:
-        """Aggressively clean disk space: logs, captures, sent images, temp files, __pycache__."""
+        """Aggressively clean disk space: logs, captures, sent images, temp files, __pycache__.
+        Archives images to /img/archive/ (PC) before deleting from Docker.
+        """
         deleted = 0
         freed = 0
         errors = []
         details = {}
+
+        # 0. Archive images to PC before deleting
+        arc_cap = self._archive_images(Path("/img/captures"), "captures")
+        arc_sent = self._archive_images(Path("/img/sent"), "sent")
+        details["archived_captures"] = arc_cap.get("archived", 0)
+        details["archived_sent"] = arc_sent.get("archived", 0)
+        errors.extend(arc_cap.get("errors", []))
+        errors.extend(arc_sent.get("errors", []))
 
         # 1. Clear transient log files (preserve extract & station playback logs)
         log_dir = Path(self.work_dir) / "logs"
@@ -6667,6 +7007,7 @@ class EditorHandler(BaseHTTPRequestHandler):
 
         Unlike deep_clean which deletes everything, smart_clean preserves
         recently-created captures, sent images, and logs.
+        Archives images to /img/archive/ (PC) before deleting from Docker.
         """
         import time
 
@@ -6675,6 +7016,14 @@ class EditorHandler(BaseHTTPRequestHandler):
         freed = 0
         errors = []
         details = {}
+
+        # Archive images to PC before cleaning old ones
+        arc_cap = self._archive_images(Path("/img/captures"), "captures")
+        arc_sent = self._archive_images(Path("/img/sent"), "sent")
+        details["archived_captures"] = arc_cap.get("archived", 0)
+        details["archived_sent"] = arc_sent.get("archived", 0)
+        errors.extend(arc_cap.get("errors", []))
+        errors.extend(arc_sent.get("errors", []))
 
         def _clean_old_files(directory: Path, label: str, recursive: bool = True,
                              skip_fn=None):
@@ -6798,11 +7147,13 @@ class EditorHandler(BaseHTTPRequestHandler):
             return None
 
     def _delete_all_captures(self) -> dict:
-        """Delete all capture screenshots."""
+        """Delete all capture screenshots (archives to PC first)."""
         cap_dir = Path("/img/captures")
+        # Archive before deleting
+        arc = self._archive_images(cap_dir, "captures")
         deleted = 0
         freed = 0
-        errors = []
+        errors = arc.get("errors", [])
         if cap_dir.exists():
             for p in cap_dir.rglob("*"):
                 if p.is_file():
@@ -6812,14 +7163,17 @@ class EditorHandler(BaseHTTPRequestHandler):
                         deleted += 1
                     except Exception as e:
                         errors.append(f"{p.name}: {e}")
-        return {"ok": True, "deleted": deleted, "freed_mb": round(freed / (1024**2), 2), "errors": errors}
+        return {"ok": True, "deleted": deleted, "freed_mb": round(freed / (1024**2), 2),
+                "archived": arc.get("archived", 0), "errors": errors}
 
     def _delete_all_sent(self) -> dict:
-        """Delete all sent images."""
+        """Delete all sent images (archives to PC first)."""
         sent_dir = Path("/img/sent")
+        # Archive before deleting
+        arc = self._archive_images(sent_dir, "sent")
         deleted = 0
         freed = 0
-        errors = []
+        errors = arc.get("errors", [])
         if sent_dir.exists():
             for p in sent_dir.rglob("*"):
                 if p.is_file():
@@ -6829,7 +7183,236 @@ class EditorHandler(BaseHTTPRequestHandler):
                         deleted += 1
                     except Exception as e:
                         errors.append(f"{p.name}: {e}")
+        return {"ok": True, "deleted": deleted, "freed_mb": round(freed / (1024**2), 2),
+                "archived": arc.get("archived", 0), "errors": errors}
+
+    # -------- Archive: save images to PC before cleanup --------
+
+    ARCHIVE_DIR = Path("/img/archive")
+
+    def _archive_images(self, src_dir: Path, label: str = "") -> dict:
+        """Copy images from src_dir to /img/archive/ before they get deleted.
+
+        The archive dir is on the volume mount (D:/android-controller/img/archive
+        on the host PC) so it persists and does NOT consume Docker overlay space.
+        Files are organized into sub-dirs by date (YYYY-MM-DD) for easy browsing.
+        """
+        archived = 0
+        errors = []
+        if not src_dir.exists():
+            return {"archived": 0, "errors": []}
+
+        today = datetime.now().strftime("%Y-%m-%d")
+        dest = self.ARCHIVE_DIR / today
+        dest.mkdir(parents=True, exist_ok=True)
+
+        for p in src_dir.rglob("*"):
+            if not p.is_file():
+                continue
+            # Skip non-image files
+            if p.suffix.lower() not in (".png", ".jpg", ".jpeg", ".bmp", ".webp"):
+                continue
+            try:
+                target = dest / p.name
+                # Avoid overwrite: add suffix if exists
+                if target.exists():
+                    stem = target.stem
+                    suffix = target.suffix
+                    counter = 1
+                    while target.exists():
+                        target = dest / f"{stem}_{counter}{suffix}"
+                        counter += 1
+                shutil.copy2(p, target)
+                archived += 1
+            except Exception as e:
+                errors.append(f"archive {p.name}: {e}")
+
+        return {"archived": archived, "label": label, "errors": errors}
+
+    def _delete_all_archive(self) -> dict:
+        """Delete all archived images from /img/archive/."""
+        deleted = 0
+        freed = 0
+        errors = []
+        if self.ARCHIVE_DIR.exists():
+            for p in self.ARCHIVE_DIR.rglob("*"):
+                if p.is_file():
+                    try:
+                        freed += p.stat().st_size
+                        p.unlink()
+                        deleted += 1
+                    except Exception as e:
+                        errors.append(f"{p.name}: {e}")
+            # Remove empty date sub-dirs
+            for d in sorted(self.ARCHIVE_DIR.iterdir(), reverse=True):
+                if d.is_dir():
+                    try:
+                        d.rmdir()  # only removes if empty
+                    except OSError:
+                        pass
         return {"ok": True, "deleted": deleted, "freed_mb": round(freed / (1024**2), 2), "errors": errors}
+
+    # -------- Gallery API endpoints --------
+
+    def _gallery_list_images(self, source: str = "archive") -> dict:
+        """List images from a source directory (archive, captures, or sent)."""
+        if source == "captures":
+            base = Path("/img/captures")
+        elif source == "sent":
+            base = Path("/img/sent")
+        else:
+            base = self.ARCHIVE_DIR
+
+        images = []
+        total_size = 0
+        if base.exists():
+            for p in base.rglob("*"):
+                if p.is_file() and p.suffix.lower() in (".png", ".jpg", ".jpeg", ".bmp", ".webp"):
+                    try:
+                        st = p.stat()
+                        images.append({
+                            "name": p.name,
+                            "path": str(p),
+                            "size": st.st_size,
+                            "mtime": st.st_mtime,
+                            "source": source,
+                        })
+                        total_size += st.st_size
+                    except OSError:
+                        pass
+
+        return {
+            "ok": True,
+            "images": images,
+            "total_count": len(images),
+            "total_size_mb": round(total_size / (1024**2), 2),
+        }
+
+    def _gallery_serve_image(self, params: dict) -> None:
+        """Serve a single image file for display or download."""
+        path = params.get("path", [""])[0]
+        source = params.get("source", ["archive"])[0]
+        download = params.get("download", [""])[0]
+        if not path:
+            self._error(400, "No path specified")
+            return
+
+        p = Path(path)
+        # Security: only serve from known image directories
+        allowed = [
+            self.ARCHIVE_DIR.resolve() if self.ARCHIVE_DIR.exists() else Path("/img/archive"),
+            Path("/img/captures").resolve() if Path("/img/captures").exists() else Path("/img/captures"),
+            Path("/img/sent").resolve() if Path("/img/sent").exists() else Path("/img/sent"),
+        ]
+        try:
+            resolved = p.resolve()
+        except (OSError, ValueError):
+            self._error(400, "Invalid path")
+            return
+        if not any(self._is_under(resolved, d) for d in allowed):
+            self._error(403, "Access denied")
+            return
+        if not p.exists() or not p.is_file():
+            self._error(404, "Not found")
+            return
+
+        try:
+            data = p.read_bytes()
+            ext = p.suffix.lower()
+            ct = {"png": "image/png", "jpg": "image/jpeg", "jpeg": "image/jpeg",
+                  "bmp": "image/bmp", "webp": "image/webp"}.get(ext.lstrip("."), "application/octet-stream")
+            self.send_response(200)
+            self.send_header("Content-Type", ct)
+            self.send_header("Content-Length", str(len(data)))
+            if download:
+                self.send_header("Content-Disposition", f'attachment; filename="{p.name}"')
+            self.send_header("Cache-Control", "max-age=300")
+            self.end_headers()
+            self.wfile.write(data)
+        except Exception as e:
+            self._error(500, str(e))
+
+    def _gallery_download_zip(self, params: dict) -> None:
+        """Download images as ZIP. If paths specified, only those; otherwise all."""
+        source = params.get("source", ["archive"])[0]
+        paths_json = params.get("paths", [""])[0]
+
+        if source == "captures":
+            base = Path("/img/captures")
+        elif source == "sent":
+            base = Path("/img/sent")
+        else:
+            base = self.ARCHIVE_DIR
+
+        try:
+            buf = io.BytesIO()
+            count = 0
+            with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+                if paths_json:
+                    import json as _json
+                    try:
+                        paths = _json.loads(paths_json)
+                    except Exception:
+                        paths = []
+                    for pstr in paths:
+                        p = Path(pstr)
+                        if p.exists() and p.is_file():
+                            zf.write(p, p.name)
+                            count += 1
+                elif base.exists():
+                    for p in base.rglob("*"):
+                        if p.is_file() and p.suffix.lower() in (".png", ".jpg", ".jpeg", ".bmp", ".webp"):
+                            arcname = str(p.relative_to(base))
+                            zf.write(p, arcname)
+                            count += 1
+
+            if count == 0:
+                self._json({"error": "No images found"})
+                return
+
+            data = buf.getvalue()
+            ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+            filename = f"{source}_images_{ts}.zip"
+            self.send_response(200)
+            self.send_header("Content-Type", "application/zip")
+            self.send_header("Content-Disposition", f'attachment; filename="{filename}"')
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
+        except Exception as e:
+            self._json({"error": str(e)})
+
+    def _gallery_delete(self, body: dict) -> dict:
+        """Delete specific images by path."""
+        paths = body.get("paths", [])
+        source = body.get("source", "archive")
+        if not paths:
+            return {"error": "No paths specified"}
+
+        # Security: only allow deletion from known image dirs
+        if source == "captures":
+            allowed_base = Path("/img/captures")
+        elif source == "sent":
+            allowed_base = Path("/img/sent")
+        else:
+            allowed_base = self.ARCHIVE_DIR
+
+        deleted = 0
+        errors = []
+        for pstr in paths:
+            p = Path(pstr)
+            try:
+                resolved = p.resolve()
+                if not self._is_under(resolved, allowed_base.resolve()):
+                    errors.append(f"{p.name}: outside allowed directory")
+                    continue
+                if p.exists() and p.is_file():
+                    p.unlink()
+                    deleted += 1
+            except Exception as e:
+                errors.append(f"{p.name}: {e}")
+
+        return {"ok": True, "deleted": deleted, "errors": errors}
 
     # -------- Delete / Clear Log endpoints --------
 
