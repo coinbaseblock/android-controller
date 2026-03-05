@@ -5314,7 +5314,9 @@ function exportCSV() {
   if (complete === 0) return;
 
   const stations = lastData.stations || [];
-  const BOM = '\uFEFF';  // UTF-8 BOM for Excel Thai support
+  // Build UTF-8 with BOM at byte level so spreadsheet apps (Excel/WPS)
+  // detect Thai text correctly instead of decoding as ANSI.
+  const UTF8_BOM = new Uint8Array([0xEF, 0xBB, 0xBF]);
   const rows = [];
 
   // Header row
@@ -5365,13 +5367,14 @@ function exportCSV() {
   }
 
   // Build CSV string
-  const csv = BOM + rows.map(r => r.map(cell => {
+  const csv = rows.map(r => r.map(cell => {
     const s = String(cell).replace(/"/g, '""');
     return '"' + s + '"';
   }).join(',')).join('\r\n');
 
   // Download
-  const blob = new Blob([csv], { type: 'text/csv;charset=utf-8' });
+  const csvBytes = new TextEncoder().encode(csv);
+  const blob = new Blob([UTF8_BOM, csvBytes], { type: 'text/csv;charset=utf-8' });
   const url = URL.createObjectURL(blob);
   const a = document.createElement('a');
   a.href = url;
