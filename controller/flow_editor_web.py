@@ -1102,6 +1102,14 @@ input:focus, select:focus, textarea:focus { outline: none; border-color: var(--b
               <button class="btn btn-sm" onclick="smartClean()" title="Smart clean: keep recent files (6h), delete older ones" style="color:#d29922;border-color:#d2992240">Smart Clean</button>
               <button class="btn btn-sm btn-danger" onclick="deepClean()" title="Deep clean: remove ALL captures, sent images, logs, cache, temp files">Deep Clean</button>
             </div>
+            <div style="margin-top:6px;font-size:10px;color:var(--text2);display:flex;align-items:center;gap:6px;flex-wrap:wrap">
+              <label style="display:flex;align-items:center;gap:4px;cursor:pointer">
+                <input type="checkbox" id="diskAutoCleanEnabled" style="width:auto" onchange="toggleDiskAutoClean(this.checked)"> Auto Clean
+              </label>
+              <label style="display:flex;align-items:center;gap:4px">Threshold
+                <input type="number" id="diskAutoCleanThreshold" min="70" max="98" step="1" value="85" style="width:52px" onchange="updateDiskAutoCleanThreshold(this.value)">%
+              </label>
+            </div>
             <div id="diskCategoryActions" style="display:none;margin-top:6px;font-size:10px">
               <div class="btn-group" style="gap:3px;flex-wrap:wrap">
                 <button class="btn btn-sm" onclick="deleteAllCaptures()" title="Delete all capture screenshots" style="font-size:10px;padding:1px 6px">Del Captures</button>
@@ -2765,6 +2773,62 @@ setInterval(() => refreshStationLogs(), 10000);
 // DISK SPACE
 // ============================================================
 let _lastDiskPct = 0;
+let _diskRefreshTimer = null;
+let _diskAutoCleanEnabled = localStorage.getItem('diskAutoCleanEnabled') === '1';
+let _diskAutoCleanThreshold = Number(localStorage.getItem('diskAutoCleanThreshold') || '85');
+let _lastAutoCleanAt = 0;
+
+function _getDiskRefreshIntervalMs() {
+  return _lastDiskPct > 90 ? 15000 : (_lastDiskPct > 80 ? 30000 : 60000);
+}
+
+function scheduleDiskRefresh() {
+  if (_diskRefreshTimer) clearTimeout(_diskRefreshTimer);
+  _diskRefreshTimer = setTimeout(async () => {
+    await refreshDiskSpace();
+    scheduleDiskRefresh();
+  }, _getDiskRefreshIntervalMs());
+}
+
+function applyDiskAutoCleanState() {
+  const enabled = document.getElementById('diskAutoCleanEnabled');
+  const threshold = document.getElementById('diskAutoCleanThreshold');
+  if (enabled) enabled.checked = _diskAutoCleanEnabled;
+  if (threshold) threshold.value = String(_diskAutoCleanThreshold);
+}
+
+function toggleDiskAutoClean(enabled) {
+  _diskAutoCleanEnabled = !!enabled;
+  localStorage.setItem('diskAutoCleanEnabled', _diskAutoCleanEnabled ? '1' : '0');
+  toast(_diskAutoCleanEnabled ? 'Auto Clean enabled' : 'Auto Clean disabled', 'info');
+}
+
+function updateDiskAutoCleanThreshold(value) {
+  const n = Number(value);
+  _diskAutoCleanThreshold = Number.isFinite(n) ? Math.max(70, Math.min(98, Math.round(n))) : 85;
+  localStorage.setItem('diskAutoCleanThreshold', String(_diskAutoCleanThreshold));
+  applyDiskAutoCleanState();
+}
+
+async function maybeAutoClean() {
+  if (!_diskAutoCleanEnabled || _lastDiskPct < _diskAutoCleanThreshold) return;
+  // Prevent spam cleanup calls while disk remains high.
+  const now = Date.now();
+  if (now - _lastAutoCleanAt < 3 * 60 * 1000) return;
+  _lastAutoCleanAt = now;
+  try {
+    const res = await api('POST', '/auto-cleanup', { threshold_pct: _diskAutoCleanThreshold });
+    if (res && res.ok && !res.skipped) {
+      toast('Auto Clean: deleted ' + res.deleted + ' files, freed ' + res.freed_mb + ' MB', 'success');
+      refreshExtractLogs();
+      refreshStationLogs();
+      await refreshDiskSpace();
+    }
+  } catch (e) {
+    // keep UI responsive; skip noisy errors for background cleanup
+  }
+}
+
 async function refreshDiskSpace() {
   try {
     const data = await api('GET', '/disk-space');
@@ -2815,11 +2879,15 @@ async function refreshDiskSpace() {
       // Show per-category delete buttons when there's something to delete
       catActions.style.display = (b.captures_count > 0 || b.sent_count > 0 || data.log_count > 0) ? '' : 'none';
     }
+    maybeAutoClean();
   } catch (e) { /* ignore */ }
 }
 setTimeout(() => refreshDiskSpace(), 1500);
-// Refresh more often (30s) when disk is low, otherwise every 60s
-setInterval(() => refreshDiskSpace(), _lastDiskPct > 80 ? 30000 : 60000);
+// Refresh more often when disk is low; recompute interval each cycle.
+setTimeout(() => {
+  applyDiskAutoCleanState();
+  scheduleDiskRefresh();
+}, 1600);
 
 async function deepClean() {
   if (!confirm('Deep Clean: Delete ALL captures, sent images, logs, cache, and temp files?\\nThis will free maximum disk space but cannot be undone.')) return;
