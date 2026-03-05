@@ -13,6 +13,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && printf 'SUBSYSTEM=="usb", ATTR{idVendor}=="04e8", MODE="0666", GROUP="plugdev"\n' \
          > /etc/udev/rules.d/51-android.rules
 
+ENV TZ=Asia/Bangkok
 ENV ADB_SERVER_PORT=5037
 WORKDIR /work
 

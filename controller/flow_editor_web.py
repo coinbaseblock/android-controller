@@ -6209,7 +6209,7 @@ class EditorHandler(BaseHTTPRequestHandler):
         log_file = log_dir / f"{stem}-extract.jsonl"
 
         entry = {
-            "timestamp": timestamp or datetime.now().isoformat(timespec="milliseconds"),
+            "timestamp": timestamp or datetime.now().astimezone().isoformat(timespec="milliseconds"),
             "label": label,
             "recording": recording_path,
             "element_count": len(elements),

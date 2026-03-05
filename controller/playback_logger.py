@@ -103,7 +103,7 @@ class PlaybackLogger:
         with self._lock:
             self._current_run = {
                 "loop": loop_idx,
-                "started_at": datetime.now().isoformat(timespec="milliseconds"),
+                "started_at": datetime.now().astimezone().isoformat(timespec="milliseconds"),
                 "completed_at": None,
                 "status": "running",
                 "ctrls": [],
@@ -129,7 +129,7 @@ class PlaybackLogger:
             "index": index,
             "type": frame_type,
             "action": action,
-            "timestamp": datetime.now().isoformat(timespec="milliseconds"),
+            "timestamp": datetime.now().astimezone().isoformat(timespec="milliseconds"),
             "result": result,
             "error": error,
             "exec_ms": exec_ms,
@@ -145,7 +145,7 @@ class PlaybackLogger:
         """Mark current loop as completed and regenerate viewer."""
         with self._lock:
             if self._current_run:
-                self._current_run["completed_at"] = datetime.now().isoformat(
+                self._current_run["completed_at"] = datetime.now().astimezone().isoformat(
                     timespec="milliseconds"
                 )
                 self._current_run["status"] = "success" if success else "error"

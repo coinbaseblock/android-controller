@@ -13,6 +13,7 @@ services:
     devices:
       - "/dev/bus/usb:/dev/bus/usb"
     environment:
+      - TZ=Asia/Bangkok
       - ADB_SERVER_PORT=5037
       - ADB_VENDOR_KEYS=/root/.android
     volumes:
@@ -51,6 +52,7 @@ services:
     # ใช้ network เดียวกับ adb-server เพื่อให้ 127.0.0.1 ของคอนเทนเนอร์นี้ ชี้ไปที่ adb-server
     network_mode: "service:adb-server"
     environment:
+      - TZ=Asia/Bangkok
       # รูปแบบที่ถูกต้องสำหรับ ADB_SERVER_SOCKET คือ tcp:<host>:<port>
       - ADB_SERVER_SOCKET=tcp:127.0.0.1:5037
       # เผื่อความเข้ากันได้กับเครื่องมือ/สคริปต์บางตัว
