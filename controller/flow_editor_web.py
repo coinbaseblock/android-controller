@@ -5169,15 +5169,25 @@ function statusClass(s) {
   return 'status-unknown';
 }
 
+function toThai(ts) {
+  if (!ts) return null;
+  const d = new Date(ts);
+  if (isNaN(d)) return null;
+  return new Date(d.toLocaleString('en-US', { timeZone: 'Asia/Bangkok' }));
+}
+
 function fmtTime(ts) {
   if (!ts) return '';
-  const m = ts.match(/T(\d{2}:\d{2})/);
-  return m ? m[1] : ts.substring(0, 16);
+  const d = toThai(ts);
+  if (!d) return '';
+  return ('0'+d.getHours()).slice(-2) + ':' + ('0'+d.getMinutes()).slice(-2);
 }
 
 function fmtDate(ts) {
   if (!ts) return '';
-  return ts.substring(0, 10);
+  const d = toThai(ts);
+  if (!d) return '';
+  return d.getFullYear() + '-' + ('0'+(d.getMonth()+1)).slice(-2) + '-' + ('0'+d.getDate()).slice(-2);
 }
 
 async function loadData() {
@@ -5187,7 +5197,7 @@ async function loadData() {
     lastData = data;
     render(data);
     updateExportButton(data);
-    document.getElementById('lastUpdate').textContent = 'Updated: ' + new Date().toLocaleTimeString();
+    document.getElementById('lastUpdate').textContent = 'Updated: ' + new Date().toLocaleTimeString('en-GB', { timeZone: 'Asia/Bangkok', hour: '2-digit', minute: '2-digit', second: '2-digit' });
   } catch(e) {
     document.getElementById('mainArea').innerHTML = '<div class="empty-state"><div class="icon">⚠️</div><p>Error loading data: ' + e.message + '</p></div>';
   }
@@ -5486,7 +5496,7 @@ function exportHTML() {
   const url = URL.createObjectURL(blob);
   const a = document.createElement('a');
   a.href = url;
-  const now = new Date();
+  const now = toThai(new Date().toISOString());
   const ts = now.getFullYear() + ('0'+(now.getMonth()+1)).slice(-2) + ('0'+now.getDate()).slice(-2) + '_' + ('0'+now.getHours()).slice(-2) + ('0'+now.getMinutes()).slice(-2);
   a.download = 'charger_status_' + ts + '_' + complete + 'rounds.html';
   document.body.appendChild(a);
