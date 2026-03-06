@@ -107,48 +107,176 @@ class SequenceRunner:
             "results": self.results[-20:],
         }
 
-    def _cleanup_captures(self) -> None:
-        """Delete capture and sent images to free disk space.
+    def _compress_captures(self) -> int:
+        """Convert PNG captures/sent to JPEG to save space instead of deleting.
 
-        Screenshots in /img/captures and /img/sent are transient – extract
-        data has already been written to the JSONL logs, so the raw PNGs
-        are no longer needed.  Also removes old transient log files (not
-        extract/station/playback logs) when disk is under pressure.
+        Returns bytes saved.  Falls back to deletion if Pillow is unavailable.
         """
-        deleted = 0
-        freed = 0
+        saved = 0
+        try:
+            from PIL import Image as _Image  # type: ignore
+            has_pil = True
+        except ImportError:
+            has_pil = False
+
         for dir_path in [Path("/img/captures"), Path("/img/sent")]:
             if not dir_path.exists():
                 continue
-            for f in dir_path.iterdir():
-                if f.is_file():
+            for f in list(dir_path.iterdir()):
+                if not f.is_file():
+                    continue
+                if has_pil and f.suffix.lower() == ".png":
                     try:
-                        freed += f.stat().st_size
+                        orig = f.stat().st_size
+                        if orig < 4096:
+                            continue
+                        img = _Image.open(f)
+                        if img.mode in ("RGBA", "LA", "P"):
+                            img = img.convert("RGB")
+                        jpg = f.with_suffix(".jpg")
+                        img.save(jpg, "JPEG", quality=55, optimize=True)
+                        saved += orig - jpg.stat().st_size
                         f.unlink()
-                        deleted += 1
+                    except Exception:
+                        pass
+                elif not has_pil and f.suffix.lower() == ".png":
+                    # Fallback: just delete PNGs if no Pillow
+                    try:
+                        saved += f.stat().st_size
+                        f.unlink()
                     except OSError:
                         pass
+        return saved
 
-        # Also clean transient log files (debug, stdout) if disk is tight
+    def _compress_old_logs(self) -> int:
+        """Gzip log files older than 1 hour. Returns bytes saved."""
+        import gzip as _gzip
+        saved = 0
+        cutoff = time.time() - 3600
+        for log_dir in [Path("/work/logs"), Path("/img/logs")]:
+            if not log_dir.exists():
+                continue
+            for f in list(log_dir.iterdir()):
+                if not f.is_file() or f.suffix == ".gz":
+                    continue
+                if f.suffix not in (".jsonl", ".json", ".log", ".txt"):
+                    continue
+                try:
+                    st = f.stat()
+                    if st.st_mtime >= cutoff or st.st_size < 1024:
+                        continue
+                    data = f.read_bytes()
+                    gz = f.with_suffix(f.suffix + ".gz")
+                    with _gzip.open(gz, "wb", compresslevel=6) as gf:
+                        gf.write(data)
+                    saved += st.st_size - gz.stat().st_size
+                    f.unlink()
+                except Exception:
+                    pass
+        return saved
+
+    def _move_to_overflow(self) -> int:
+        """Move old captures/sent to overflow dir if configured. Returns bytes freed."""
+        import shutil as _shutil
+        config_path = Path("/work/.overflow_config")
+        if not config_path.exists():
+            return 0
+        try:
+            import json as _json
+            cfg = _json.loads(config_path.read_text(encoding="utf-8"))
+            overflow = Path(cfg.get("path", ""))
+            if not overflow.exists():
+                return 0
+        except Exception:
+            return 0
+
+        freed = 0
+        cutoff = time.time() - 1800  # move files older than 30 min
+        for sub, src in [("captures", Path("/img/captures")), ("sent", Path("/img/sent"))]:
+            dst_dir = overflow / sub
+            dst_dir.mkdir(exist_ok=True)
+            if not src.exists():
+                continue
+            for f in list(src.iterdir()):
+                if not f.is_file():
+                    continue
+                try:
+                    if f.stat().st_mtime >= cutoff:
+                        continue
+                    sz = f.stat().st_size
+                    _shutil.move(str(f), str(dst_dir / f.name))
+                    freed += sz
+                except Exception:
+                    pass
+        return freed
+
+    def _cleanup_captures(self) -> None:
+        """Free disk space between scripts using a compress-first strategy.
+
+        Priority order:
+        1. Compress PNG captures to JPEG (~5x smaller, preserves files)
+        2. Compress old logs with gzip (~10x smaller)
+        3. Move old files to overflow directory (if configured)
+        4. Delete transient files only when disk pressure is high (>85%)
+        """
+        freed = 0
+        actions = []
+
+        # Step 1: Compress images (non-destructive)
+        img_saved = self._compress_captures()
+        if img_saved > 0:
+            freed += img_saved
+            actions.append(f"compressed images ({img_saved / (1024*1024):.1f} MB)")
+
+        # Step 2: Compress old logs (non-destructive)
+        log_saved = self._compress_old_logs()
+        if log_saved > 0:
+            freed += log_saved
+            actions.append(f"compressed logs ({log_saved / (1024*1024):.1f} MB)")
+
+        # Step 3: Move to overflow (non-destructive, preserves on secondary)
+        overflow_freed = self._move_to_overflow()
+        if overflow_freed > 0:
+            freed += overflow_freed
+            actions.append(f"moved to overflow ({overflow_freed / (1024*1024):.1f} MB)")
+
+        # Step 4: Check disk pressure - only delete if still high
         import shutil
         try:
             usage = shutil.disk_usage("/")
             used_pct = usage.used / usage.total * 100 if usage.total else 0
         except OSError:
             used_pct = 0
+
+        deleted = 0
         if used_pct > 85:
+            # Delete old JPEG captures (already compressed, extract data saved)
+            for dir_path in [Path("/img/captures"), Path("/img/sent")]:
+                if not dir_path.exists():
+                    continue
+                for f in dir_path.iterdir():
+                    if f.is_file():
+                        try:
+                            freed += f.stat().st_size
+                            f.unlink()
+                            deleted += 1
+                        except OSError:
+                            pass
+
+            # Delete transient log files
             log_dir = Path("/work/logs")
             if log_dir.exists():
                 for f in log_dir.iterdir():
                     if not f.is_file():
                         continue
-                    # Preserve user data logs
                     if f.name.endswith("-extract.jsonl") or f.name.startswith("extract-"):
                         continue
                     if f.name.endswith("-playback.json"):
                         continue
-                    # Keep station logs
                     if f.name.startswith("station-") and f.name.endswith(".jsonl"):
+                        continue
+                    # Keep compressed logs
+                    if f.suffix == ".gz":
                         continue
                     try:
                         freed += f.stat().st_size
@@ -156,23 +284,26 @@ class SequenceRunner:
                         deleted += 1
                     except OSError:
                         pass
-            # Clean __pycache__ directories
+
+            # Clean __pycache__
             for d in [Path("/work"), Path("/usr/local/bin")]:
                 for pc in list(d.rglob("__pycache__")):
                     if pc.is_dir():
                         try:
-                            import shutil as _shutil
                             for pf in pc.rglob("*"):
                                 if pf.is_file():
                                     freed += pf.stat().st_size
                                     deleted += 1
-                            _shutil.rmtree(pc, ignore_errors=True)
+                            shutil.rmtree(pc, ignore_errors=True)
                         except OSError:
                             pass
 
-        if deleted:
+            if deleted:
+                actions.append(f"deleted {deleted} files")
+
+        if freed > 0:
             self.log(
-                f"Cleaned up {deleted} files ({freed / (1024*1024):.1f} MB freed)",
+                f"Cleanup: {freed / (1024*1024):.1f} MB freed ({', '.join(actions)})",
                 "OK",
             )
 
