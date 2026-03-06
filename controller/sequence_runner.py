@@ -213,11 +213,10 @@ class SequenceRunner:
     def _cleanup_captures(self) -> None:
         """Free disk space between scripts using a compress-first strategy.
 
-        Priority order:
+        Priority order (non-destructive):
         1. Compress PNG captures to JPEG (~5x smaller, preserves files)
         2. Compress old logs with gzip (~10x smaller)
         3. Move old files to overflow directory (if configured)
-        4. Delete transient files only when disk pressure is high (>85%)
         """
         freed = 0
         actions = []
@@ -240,66 +239,7 @@ class SequenceRunner:
             freed += overflow_freed
             actions.append(f"moved to overflow ({overflow_freed / (1024*1024):.1f} MB)")
 
-        # Step 4: Check disk pressure - only delete if still high
-        import shutil
-        try:
-            usage = shutil.disk_usage("/")
-            used_pct = usage.used / usage.total * 100 if usage.total else 0
-        except OSError:
-            used_pct = 0
-
-        deleted = 0
-        if used_pct > 85:
-            # Delete old JPEG captures (already compressed, extract data saved)
-            for dir_path in [Path("/img/captures"), Path("/img/sent")]:
-                if not dir_path.exists():
-                    continue
-                for f in dir_path.iterdir():
-                    if f.is_file():
-                        try:
-                            freed += f.stat().st_size
-                            f.unlink()
-                            deleted += 1
-                        except OSError:
-                            pass
-
-            # Delete transient log files
-            log_dir = Path("/work/logs")
-            if log_dir.exists():
-                for f in log_dir.iterdir():
-                    if not f.is_file():
-                        continue
-                    if f.name.endswith("-extract.jsonl") or f.name.startswith("extract-"):
-                        continue
-                    if f.name.endswith("-playback.json"):
-                        continue
-                    if f.name.startswith("station-") and f.name.endswith(".jsonl"):
-                        continue
-                    # Keep compressed logs
-                    if f.suffix == ".gz":
-                        continue
-                    try:
-                        freed += f.stat().st_size
-                        f.unlink()
-                        deleted += 1
-                    except OSError:
-                        pass
-
-            # Clean __pycache__
-            for d in [Path("/work"), Path("/usr/local/bin")]:
-                for pc in list(d.rglob("__pycache__")):
-                    if pc.is_dir():
-                        try:
-                            for pf in pc.rglob("*"):
-                                if pf.is_file():
-                                    freed += pf.stat().st_size
-                                    deleted += 1
-                            shutil.rmtree(pc, ignore_errors=True)
-                        except OSError:
-                            pass
-
-            if deleted:
-                actions.append(f"deleted {deleted} files")
+        # No auto-deletion here: keep history visible and avoid unexpected data loss.
 
         if freed > 0:
             self.log(

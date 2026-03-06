@@ -6105,8 +6105,9 @@ class EditorHandler(BaseHTTPRequestHandler):
             return {"ok": False, "error": "No recording path specified"}
         if not Path(recording_path).exists():
             return {"ok": False, "error": f"File not found: {recording_path}"}
-        # Auto-cleanup before playback if disk space is low
-        self._auto_cleanup(threshold_pct=80.0)
+        # Auto storage optimization before playback (non-destructive only).
+        # Preserve history by compressing/moving instead of auto-deleting.
+        self._storage_expand()
         return _proc_manager.start_play(recording_path, self.work_dir)
 
     def _start_record(self, body: dict) -> dict:
@@ -7991,8 +7992,9 @@ class EditorHandler(BaseHTTPRequestHandler):
         if not scripts:
             return {"ok": False, "error": "No scripts provided"}
 
-        # Auto-cleanup before sequence playback if disk space is low
-        self._auto_cleanup(threshold_pct=80.0)
+        # Auto storage optimization before sequence playback (non-destructive only).
+        # Preserve history by compressing/moving instead of auto-deleting.
+        self._storage_expand()
 
         # Save temp sequence file
         seq_data = {"name": "temp_sequence", "scripts": scripts, "settings": settings}
