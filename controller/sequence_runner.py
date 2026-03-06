@@ -148,8 +148,19 @@ class SequenceRunner:
                         pass
         return saved
 
+    @staticmethod
+    def _is_station_data_file(name: str) -> bool:
+        """Check if file contains station/extract data that must not be deleted or compressed."""
+        return (name.endswith("-extract.jsonl") or name.startswith("extract-")
+                or name.endswith("-playback.json") or name.endswith("-playback.html"))
+
     def _compress_old_logs(self) -> int:
-        """Gzip log files older than 1 hour. Returns bytes saved."""
+        """Gzip log files older than 1 hour. Returns bytes saved.
+
+        NEVER compresses station data files (*-extract.jsonl, *-playback.json)
+        because they are actively appended to during playback and contain
+        station counting data needed for accurate loop tracking.
+        """
         import gzip as _gzip
         saved = 0
         cutoff = time.time() - 3600
@@ -160,6 +171,9 @@ class SequenceRunner:
                 if not f.is_file() or f.suffix == ".gz":
                     continue
                 if f.suffix not in (".jsonl", ".json", ".log", ".txt"):
+                    continue
+                # Never compress station/extract data – it's actively used
+                if self._is_station_data_file(f.name):
                     continue
                 try:
                     st = f.stat()
