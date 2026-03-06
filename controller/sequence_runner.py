@@ -108,11 +108,12 @@ class SequenceRunner:
         }
 
     def _cleanup_captures(self) -> None:
-        """Delete capture and sent images after each loop to free disk space.
+        """Delete capture and sent images to free disk space.
 
         Screenshots in /img/captures and /img/sent are transient – extract
         data has already been written to the JSONL logs, so the raw PNGs
-        are no longer needed.
+        are no longer needed.  Also removes old transient log files (not
+        extract/station/playback logs) when disk is under pressure.
         """
         deleted = 0
         freed = 0
@@ -127,9 +128,51 @@ class SequenceRunner:
                         deleted += 1
                     except OSError:
                         pass
+
+        # Also clean transient log files (debug, stdout) if disk is tight
+        import shutil
+        try:
+            usage = shutil.disk_usage("/")
+            used_pct = usage.used / usage.total * 100 if usage.total else 0
+        except OSError:
+            used_pct = 0
+        if used_pct > 85:
+            log_dir = Path("/work/logs")
+            if log_dir.exists():
+                for f in log_dir.iterdir():
+                    if not f.is_file():
+                        continue
+                    # Preserve user data logs
+                    if f.name.endswith("-extract.jsonl") or f.name.startswith("extract-"):
+                        continue
+                    if f.name.endswith("-playback.json"):
+                        continue
+                    # Keep station logs
+                    if f.name.startswith("station-") and f.name.endswith(".jsonl"):
+                        continue
+                    try:
+                        freed += f.stat().st_size
+                        f.unlink()
+                        deleted += 1
+                    except OSError:
+                        pass
+            # Clean __pycache__ directories
+            for d in [Path("/work"), Path("/usr/local/bin")]:
+                for pc in list(d.rglob("__pycache__")):
+                    if pc.is_dir():
+                        try:
+                            import shutil as _shutil
+                            for pf in pc.rglob("*"):
+                                if pf.is_file():
+                                    freed += pf.stat().st_size
+                                    deleted += 1
+                            _shutil.rmtree(pc, ignore_errors=True)
+                        except OSError:
+                            pass
+
         if deleted:
             self.log(
-                f"Cleaned up {deleted} capture files ({freed / (1024*1024):.1f} MB freed)",
+                f"Cleaned up {deleted} files ({freed / (1024*1024):.1f} MB freed)",
                 "OK",
             )
 
@@ -212,12 +255,15 @@ class SequenceRunner:
                             self._running = False
                             break
 
+                    # Clean up capture images between scripts to prevent disk full on long runs
+                    self._cleanup_captures()
+
                     # Delay between scripts
                     if self._running and i < len(enabled_scripts) - 1 and self.script_delay > 0:
                         self.log(f"Waiting {self.script_delay}s before next script...", "INFO")
                         time.sleep(self.script_delay)
 
-                # Clean up capture images after each loop to prevent disk full
+                # Also clean up after the full loop completes
                 self._cleanup_captures()
 
                 if not self.loop:

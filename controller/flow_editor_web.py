@@ -203,6 +203,9 @@ class ProcessManager:
                 return {"ok": True}
 
             try:
+                # Resume first if paused, so SIGINT can be delivered
+                if self._status == "paused":
+                    os.killpg(os.getpgid(self._proc.pid), signal.SIGCONT)
                 # Send SIGINT (Ctrl+C) for graceful shutdown
                 os.killpg(os.getpgid(self._proc.pid), signal.SIGINT)
                 try:
@@ -216,6 +219,34 @@ class ProcessManager:
             self._status = "idle"
             self._proc = None
             return {"ok": True}
+
+    def pause(self) -> dict:
+        """Pause the running subprocess using SIGTSTP."""
+        with self._lock:
+            if not self._proc or self._proc.poll() is not None:
+                return {"ok": False, "error": "No process running"}
+            if self._status == "paused":
+                return {"ok": True, "already": True}
+            try:
+                os.killpg(os.getpgid(self._proc.pid), signal.SIGTSTP)
+                self._status = "paused"
+                return {"ok": True}
+            except (ProcessLookupError, OSError) as e:
+                return {"ok": False, "error": str(e)}
+
+    def resume(self) -> dict:
+        """Resume a paused subprocess using SIGCONT."""
+        with self._lock:
+            if not self._proc or self._proc.poll() is not None:
+                return {"ok": False, "error": "No process running"}
+            if self._status != "paused":
+                return {"ok": True, "already": True}
+            try:
+                os.killpg(os.getpgid(self._proc.pid), signal.SIGCONT)
+                self._status = "playing"
+                return {"ok": True}
+            except (ProcessLookupError, OSError) as e:
+                return {"ok": False, "error": str(e)}
 
     def _start_monitor(self) -> None:
         if self._monitor_thread and self._monitor_thread.is_alive():
@@ -342,6 +373,9 @@ class SequenceProcessManager:
                 return {"ok": True}
 
             try:
+                # Resume first if paused, so SIGINT can be delivered
+                if self._status == "paused":
+                    os.killpg(os.getpgid(self._proc.pid), signal.SIGCONT)
                 os.killpg(os.getpgid(self._proc.pid), signal.SIGINT)
                 try:
                     self._proc.wait(timeout=5)
@@ -354,6 +388,34 @@ class SequenceProcessManager:
             self._status = "idle"
             self._proc = None
             return {"ok": True}
+
+    def pause(self) -> dict:
+        """Pause the running sequence subprocess using SIGTSTP."""
+        with self._lock:
+            if not self._proc or self._proc.poll() is not None:
+                return {"ok": False, "error": "No process running"}
+            if self._status == "paused":
+                return {"ok": True, "already": True}
+            try:
+                os.killpg(os.getpgid(self._proc.pid), signal.SIGTSTP)
+                self._status = "paused"
+                return {"ok": True}
+            except (ProcessLookupError, OSError) as e:
+                return {"ok": False, "error": str(e)}
+
+    def resume(self) -> dict:
+        """Resume a paused sequence subprocess using SIGCONT."""
+        with self._lock:
+            if not self._proc or self._proc.poll() is not None:
+                return {"ok": False, "error": "No process running"}
+            if self._status != "paused":
+                return {"ok": True, "already": True}
+            try:
+                os.killpg(os.getpgid(self._proc.pid), signal.SIGCONT)
+                self._status = "running"
+                return {"ok": True}
+            except (ProcessLookupError, OSError) as e:
+                return {"ok": False, "error": str(e)}
 
     def _start_monitor(self) -> None:
         if self._monitor_thread and self._monitor_thread.is_alive():
@@ -585,6 +647,17 @@ input:focus, select:focus, textarea:focus { outline: none; border-color: var(--b
 .btn-stop:hover { background: #8b949e; transform: scale(1.05); }
 .btn-stop:active { transform: scale(0.95); }
 .btn-stop:disabled { opacity: .4; cursor: not-allowed; transform: none; pointer-events: none; }
+/* Pause button */
+.btn-pause { background: #d29922; border-color: #d29922; color: #fff; display: inline-flex; align-items: center; gap: 6px; position: relative; z-index: 1; pointer-events: auto; cursor: pointer; transition: all .2s ease; }
+.btn-pause:hover { background: #e3b341; transform: scale(1.05); }
+.btn-pause:active { transform: scale(0.95); }
+.btn-pause:disabled { opacity: .4; cursor: not-allowed; transform: none; pointer-events: none; }
+.btn-pause.active { background: #bb8009; animation: pulse-pause 1.5s ease-in-out infinite; }
+@keyframes pulse-pause { 0%,100% { box-shadow: 0 0 0 0 rgba(210,153,34,.5); } 50% { box-shadow: 0 0 8px 4px rgba(210,153,34,.3); } }
+.btn-loop-pause { background: #d29922; border-color: #d29922; color: #fff; display: inline-flex; align-items: center; gap: 4px; cursor: pointer; transition: all .2s ease; }
+.btn-loop-pause:hover { background: #e3b341; transform: scale(1.05); }
+.btn-loop-pause.active { background: #bb8009; animation: pulse-pause 1.5s ease-in-out infinite; }
+.status-paused { background: #3d2f1f; color: #d29922; }
 
 /* Loop Run button */
 .btn-loop-run { background: #8957e5; border-color: #8957e5; color: #fff; display: inline-flex; align-items: center; gap: 5px; position: relative; z-index: 1; pointer-events: auto; cursor: pointer; transition: all .2s ease; font-weight: 600; }
@@ -954,6 +1027,9 @@ input:focus, select:focus, textarea:focus { outline: none; border-color: var(--b
       <button type="button" class="btn btn-sm btn-rec" id="btnRec" title="Record touches">
         <span class="rec-dot" id="recDot"></span> Rec
       </button>
+      <button type="button" class="btn btn-sm btn-pause" id="btnPause" style="display:none" title="Pause / Resume playback">
+        &#10074;&#10074; Pause
+      </button>
       <button type="button" class="btn btn-sm btn-stop" id="btnStop" disabled title="Stop">
         &#9632; Stop
       </button>
@@ -976,6 +1052,9 @@ input:focus, select:focus, textarea:focus { outline: none; border-color: var(--b
         <input type="number" id="loopRunCount" value="3" min="0" step="1">
       </label>
       <label title="Run forever until stopped"><input type="checkbox" id="loopRunForever"> Forever</label>
+      <button type="button" class="btn btn-sm btn-loop-pause" id="btnLoopPause" onclick="loopRunPause()" style="display:none" title="Pause / Resume loop run">
+        &#10074;&#10074; Pause
+      </button>
       <button type="button" class="btn btn-sm btn-loop-stop" id="btnLoopStop" onclick="loopRunStop()" style="display:none" title="Stop loop run">
         &#9632; Stop
       </button>
@@ -1957,6 +2036,10 @@ document.getElementById('btnStop').addEventListener('click', function(e) {
   e.stopPropagation();
   if (!this.disabled) stopPlayback();
 });
+document.getElementById('btnPause').addEventListener('click', function(e) {
+  e.stopPropagation();
+  togglePausePlay();
+});
 
 function renderMeta() {
   if (!recording) return;
@@ -2636,6 +2719,9 @@ async function loopRunAll() {
     seqRunning = true;
     document.getElementById('btnLoopRun').style.display = 'none';
     document.getElementById('btnLoopStop').style.display = '';
+    document.getElementById('btnLoopPause').style.display = '';
+    document.getElementById('btnLoopPause').innerHTML = '&#10074;&#10074; Pause';
+    document.getElementById('btnLoopPause').classList.remove('active');
     const label = forever ? 'forever' : loopCount + 'x';
     toast('Loop Run started (' + label + ', ' + scripts.length + ' scripts)', 'success');
     loopRunPollStatus();
@@ -2644,11 +2730,38 @@ async function loopRunAll() {
   }
 }
 
+async function loopRunPause() {
+  const btn = document.getElementById('btnLoopPause');
+  if (btn.classList.contains('active')) {
+    // Currently paused -> resume
+    const res = await api('POST', '/sequence/resume', {});
+    if (res.ok) {
+      btn.classList.remove('active');
+      btn.innerHTML = '&#10074;&#10074; Pause';
+      toast('Loop Run resumed', 'success');
+    } else {
+      toast('Resume failed: ' + (res.error || ''), 'error');
+    }
+  } else {
+    // Currently running -> pause
+    const res = await api('POST', '/sequence/pause', {});
+    if (res.ok) {
+      btn.classList.add('active');
+      btn.innerHTML = '&#9654; Resume';
+      toast('Loop Run paused', 'info');
+    } else {
+      toast('Pause failed: ' + (res.error || ''), 'error');
+    }
+  }
+}
+
 async function loopRunStop() {
   await api('POST', '/sequence/stop', {});
   seqRunning = false;
   document.getElementById('btnLoopRun').style.display = '';
   document.getElementById('btnLoopStop').style.display = 'none';
+  document.getElementById('btnLoopPause').style.display = 'none';
+  document.getElementById('btnLoopPause').classList.remove('active');
   document.getElementById('loopRunStatus').textContent = '';
   if (loopRunPollTimer) { clearInterval(loopRunPollTimer); loopRunPollTimer = null; }
   toast('Loop Run stopped');
@@ -2660,17 +2773,32 @@ function loopRunPollStatus() {
     const st = await api('GET', '/sequence/status');
     const el = document.getElementById('loopRunStatus');
     const seqEl = document.getElementById('seqStatus');
+    const pauseBtn = document.getElementById('btnLoopPause');
     if (st.status === 'running') {
       const msg = 'Loop ' + st.current_loop + ' | Script ' + st.current_script_idx + '/' + st.total_scripts + ': ' + (st.current_script_name || '');
       el.innerHTML = '<span style="color:#a371f7">' + msg + '</span>';
       if (seqEl) seqEl.innerHTML = '<span style="color:var(--green)">Running</span> | ' + msg;
+      if (pauseBtn.classList.contains('active')) {
+        pauseBtn.classList.remove('active');
+        pauseBtn.innerHTML = '&#10074;&#10074; Pause';
+      }
+    } else if (st.status === 'paused') {
+      const msg = 'Loop ' + st.current_loop + ' | Script ' + st.current_script_idx + '/' + st.total_scripts + ' (PAUSED)';
+      el.innerHTML = '<span style="color:#d29922">' + msg + '</span>';
+      if (seqEl) seqEl.innerHTML = '<span style="color:#d29922">Paused</span> | ' + msg;
+      if (!pauseBtn.classList.contains('active')) {
+        pauseBtn.classList.add('active');
+        pauseBtn.innerHTML = '&#9654; Resume';
+      }
     } else {
       el.textContent = st.status || 'idle';
       if (seqEl) seqEl.innerHTML = '<span style="color:var(--text2)">' + (st.status || 'idle') + '</span>';
-      if (st.status !== 'running') {
+      if (st.status !== 'running' && st.status !== 'paused') {
         seqRunning = false;
         document.getElementById('btnLoopRun').style.display = '';
         document.getElementById('btnLoopStop').style.display = 'none';
+        document.getElementById('btnLoopPause').style.display = 'none';
+        pauseBtn.classList.remove('active');
         clearInterval(loopRunPollTimer);
         loopRunPollTimer = null;
         el.textContent = '';
@@ -2779,7 +2907,7 @@ let _diskAutoCleanThreshold = Number(localStorage.getItem('diskAutoCleanThreshol
 let _lastAutoCleanAt = 0;
 
 function _getDiskRefreshIntervalMs() {
-  return _lastDiskPct > 90 ? 15000 : (_lastDiskPct > 80 ? 30000 : 60000);
+  return _lastDiskPct > 95 ? 10000 : (_lastDiskPct > 90 ? 15000 : (_lastDiskPct > 80 ? 30000 : 60000));
 }
 
 function scheduleDiskRefresh() {
@@ -2813,8 +2941,10 @@ function updateDiskAutoCleanThreshold(value) {
 async function maybeAutoClean() {
   if (!_diskAutoCleanEnabled || _lastDiskPct < _diskAutoCleanThreshold) return;
   // Prevent spam cleanup calls while disk remains high.
+  // Use shorter cooldown when disk is critical (>90%: 60s, >80%: 120s, else: 180s).
   const now = Date.now();
-  if (now - _lastAutoCleanAt < 3 * 60 * 1000) return;
+  const cooldownMs = _lastDiskPct > 90 ? 60000 : (_lastDiskPct > 80 ? 120000 : 180000);
+  if (now - _lastAutoCleanAt < cooldownMs) return;
   _lastAutoCleanAt = now;
   try {
     const res = await api('POST', '/auto-cleanup', { threshold_pct: _diskAutoCleanThreshold });
@@ -3149,6 +3279,7 @@ function updatePlaybackUI(state, info) {
   const btnPlay = document.getElementById('btnPlay');
   const btnRec = document.getElementById('btnRec');
   const btnStop = document.getElementById('btnStop');
+  const btnPause = document.getElementById('btnPause');
   const statusBadge = document.getElementById('statusBadge');
   const recDot = document.getElementById('recDot');
   const progressContainer = document.getElementById('progressContainer');
@@ -3159,6 +3290,7 @@ function updatePlaybackUI(state, info) {
   // Reset all
   btnPlay.classList.remove('active');
   btnRec.classList.remove('active');
+  btnPause.classList.remove('active');
   recDot.classList.remove('active');
   progressBar.classList.remove('recording');
   timerEl.classList.remove('recording', 'playing');
@@ -3167,6 +3299,7 @@ function updatePlaybackUI(state, info) {
     btnPlay.disabled = false;
     btnRec.disabled = false;
     btnStop.disabled = true;
+    btnPause.style.display = 'none';
     statusBadge.className = 'status-badge status-idle';
     statusBadge.textContent = 'IDLE';
     progressContainer.style.display = 'none';
@@ -3180,6 +3313,8 @@ function updatePlaybackUI(state, info) {
     btnPlay.disabled = true;
     btnRec.disabled = true;
     btnStop.disabled = false;
+    btnPause.style.display = '';
+    btnPause.innerHTML = '&#10074;&#10074; Pause';
     statusBadge.className = 'status-badge status-playing';
     statusBadge.textContent = 'PLAYING';
     progressContainer.style.display = '';
@@ -3191,12 +3326,29 @@ function updatePlaybackUI(state, info) {
       stepInfo.textContent = info.current_step + '/' + info.total_steps;
       highlightPlayingFrame(info.current_step);
     }
+  } else if (state === 'paused') {
+    btnPlay.disabled = true;
+    btnRec.disabled = true;
+    btnStop.disabled = false;
+    btnPause.style.display = '';
+    btnPause.classList.add('active');
+    btnPause.innerHTML = '&#9654; Resume';
+    statusBadge.className = 'status-badge status-paused';
+    statusBadge.textContent = 'PAUSED';
+    progressContainer.style.display = '';
+    timerEl.style.display = '';
+    if (info) {
+      const pct = info.total_steps > 0 ? (info.current_step / info.total_steps * 100) : 0;
+      progressBar.style.width = pct + '%';
+      stepInfo.textContent = info.current_step + '/' + info.total_steps;
+    }
   } else if (state === 'recording') {
     btnRec.classList.add('active');
     recDot.classList.add('active');
     btnPlay.disabled = true;
     btnRec.disabled = true;
     btnStop.disabled = false;
+    btnPause.style.display = 'none';
     statusBadge.className = 'status-badge status-recording';
     statusBadge.textContent = 'REC';
     progressContainer.style.display = '';
@@ -3211,6 +3363,7 @@ function updatePlaybackUI(state, info) {
     btnPlay.disabled = false;
     btnRec.disabled = false;
     btnStop.disabled = true;
+    btnPause.style.display = 'none';
     statusBadge.className = 'status-badge status-error';
     statusBadge.textContent = 'ERROR';
     progressContainer.style.display = 'none';
@@ -3219,6 +3372,26 @@ function updatePlaybackUI(state, info) {
     highlightPlayingFrame(-1);
     stopStatusPoll();
     stopElapsedTimer();
+  }
+}
+
+async function togglePausePlay() {
+  if (playbackState === 'playing') {
+    const res = await api('POST', '/pause', {});
+    if (res.ok) {
+      updatePlaybackUI('paused', null);
+      toast('Playback paused', 'info');
+    } else {
+      toast('Pause failed: ' + (res.error || ''), 'error');
+    }
+  } else if (playbackState === 'paused') {
+    const res = await api('POST', '/resume', {});
+    if (res.ok) {
+      updatePlaybackUI('playing', null);
+      toast('Playback resumed', 'success');
+    } else {
+      toast('Resume failed: ' + (res.error || ''), 'error');
+    }
   }
 }
 
@@ -3367,6 +3540,8 @@ function startStatusPoll() {
         }
       } else if (res.status === 'playing') {
         updatePlaybackUI('playing', res);
+      } else if (res.status === 'paused') {
+        updatePlaybackUI('paused', res);
       } else if (res.status === 'recording') {
         updatePlaybackUI('recording', res);
       } else if (res.status === 'error') {
@@ -5619,10 +5794,18 @@ class EditorHandler(BaseHTTPRequestHandler):
             self._json(self._device_shell(body))
         elif path == "/api/inspect":
             self._json(self._inspect_at_point(body))
+        elif path == "/api/pause":
+            self._json(_proc_manager.pause())
+        elif path == "/api/resume":
+            self._json(_proc_manager.resume())
         elif path == "/api/sequence/play":
             self._json(self._seq_play(body))
         elif path == "/api/sequence/stop":
             self._json(_seq_manager.stop())
+        elif path == "/api/sequence/pause":
+            self._json(_seq_manager.pause())
+        elif path == "/api/sequence/resume":
+            self._json(_seq_manager.resume())
         elif path == "/api/sequence/save":
             self._json(self._seq_save(body))
         elif path == "/api/delete":
