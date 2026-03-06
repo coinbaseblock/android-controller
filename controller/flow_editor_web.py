@@ -1186,7 +1186,7 @@ input:focus, select:focus, textarea:focus { outline: none; border-color: var(--b
                 <input type="checkbox" id="diskAutoCleanEnabled" style="width:auto" onchange="toggleDiskAutoClean(this.checked)"> Auto Clean
               </label>
               <label style="display:flex;align-items:center;gap:4px">Threshold
-                <input type="number" id="diskAutoCleanThreshold" min="70" max="98" step="1" value="85" style="width:52px" onchange="updateDiskAutoCleanThreshold(this.value)">%
+                <input type="number" id="diskAutoCleanThreshold" min="70" max="98" step="1" value="90" style="width:52px" onchange="updateDiskAutoCleanThreshold(this.value)">%
               </label>
             </div>
             <div style="margin-top:6px">
@@ -2917,7 +2917,7 @@ setInterval(() => refreshStationLogs(), 10000);
 let _lastDiskPct = 0;
 let _diskRefreshTimer = null;
 let _diskAutoCleanEnabled = localStorage.getItem('diskAutoCleanEnabled') === '1';
-let _diskAutoCleanThreshold = Number(localStorage.getItem('diskAutoCleanThreshold') || '85');
+let _diskAutoCleanThreshold = Number(localStorage.getItem('diskAutoCleanThreshold') || '90');
 let _lastAutoCleanAt = 0;
 let _autoCleanRunning = false;
 let _autoCleanConsecutive = 0;
@@ -7213,6 +7213,18 @@ class EditorHandler(BaseHTTPRequestHandler):
         except Exception as e:
             return {"ok": False, "error": str(e)}
 
+    @staticmethod
+    def _is_station_data_file(p: Path) -> bool:
+        """Check if a file is station/extract data that must NEVER be auto-deleted.
+
+        These files contain loop counting and station tracking data.
+        Deleting them causes loop counters to reset and station counts
+        to become inconsistent across runs.
+        """
+        name = p.name
+        return (name.endswith("-extract.jsonl") or name.startswith("extract-")
+                or name.endswith("-playback.json") or name.endswith("-playback.html"))
+
     def _deep_clean(self) -> dict:
         """Aggressively clean disk space: logs, captures, sent images, temp files, __pycache__."""
         deleted = 0
@@ -7221,15 +7233,14 @@ class EditorHandler(BaseHTTPRequestHandler):
         details = {}
 
         # 1. Clear transient log files (preserve extract & station playback logs)
-        log_dir = Path(self.work_dir) / "logs"
         log_del = 0
-        if log_dir.exists():
+        for log_dir in [Path(self.work_dir) / "logs", Path("/img/logs")]:
+            if not log_dir.exists():
+                continue
             for p in log_dir.iterdir():
                 if p.is_file():
-                    # Skip user data logs that cannot be regenerated
-                    if p.name.endswith("-extract.jsonl") or p.name.startswith("extract-"):
-                        continue
-                    if p.name.endswith("-playback.json"):
+                    # Skip station/extract data – cannot be regenerated
+                    if self._is_station_data_file(p):
                         continue
                     try:
                         freed += p.stat().st_size
@@ -7363,12 +7374,16 @@ class EditorHandler(BaseHTTPRequestHandler):
 
         details["captures"] = _clean_old_files(Path("/img/captures"), "capture")
         details["sent"] = _clean_old_files(Path("/img/sent"), "sent")
-        def _is_user_data_log(p: Path) -> bool:
-            return (p.name.endswith("-extract.jsonl") or p.name.startswith("extract-")
-                    or p.name.endswith("-playback.json"))
 
-        details["logs"] = _clean_old_files(Path(self.work_dir) / "logs", "log",
-                                           recursive=False, skip_fn=_is_user_data_log)
+        # ALWAYS protect station/extract data files – they contain loop counters
+        # and station tracking.  Deleting them breaks loop counting accuracy.
+        _skip_station_data = self._is_station_data_file
+
+        log_total = 0
+        for log_dir in [Path(self.work_dir) / "logs", Path("/img/logs")]:
+            log_total += _clean_old_files(log_dir, "log",
+                                          recursive=False, skip_fn=_skip_station_data)
+        details["logs"] = log_total
 
         # Always clean pycache and temp files fully
         pc_del = 0
@@ -7424,7 +7439,7 @@ class EditorHandler(BaseHTTPRequestHandler):
             "errors": errors[:10],
         }
 
-    def _auto_cleanup(self, threshold_pct: float = 80.0) -> dict | None:
+    def _auto_cleanup(self, threshold_pct: float = 90.0) -> dict | None:
         """Auto-cleanup when disk usage exceeds threshold.
 
         Returns cleanup result dict if cleanup was performed, None if not needed.
@@ -7432,10 +7447,17 @@ class EditorHandler(BaseHTTPRequestHandler):
         Checks ALL relevant filesystems (overlay, /work, /img) and triggers
         cleanup based on the most constrained one.
 
-        Strategy: try compression first to preserve data, then escalate to
-        smart_clean only (never deep_clean) to protect active session files.
-        Recent captures (< 1 hour) are always preserved to avoid breaking
-        the display of actively-running recordings.
+        IMPORTANT: Auto-cleanup ONLY triggers when disk usage >= threshold_pct
+        (configured by user, default 90%).  It NEVER deletes extract logs
+        (*-extract.jsonl) or playback logs (*-playback.json) because those
+        contain station counting data that must be preserved for accurate
+        loop/station tracking.
+
+        Strategy (escalating):
+        1. Below 90%: non-destructive only (compress logs, compress images, overflow)
+        2. 90-95%: compress aggressively + smart_clean old captures/sent (keep 6h)
+        3. Above 95%: compress everything + smart_clean (keep 3h minimum)
+        Never uses deep_clean.  Never deletes station/extract data.
         """
         try:
             # Check all relevant mount points, use the most constrained
@@ -7451,56 +7473,55 @@ class EditorHandler(BaseHTTPRequestHandler):
             if used_pct <= threshold_pct:
                 return None
 
-            combined: dict = {"ok": True, "stages": []}
+            combined: dict = {"ok": True, "stages": [], "deleted": 0}
 
-            # Stage 1: Try compression first (non-destructive)
-            if used_pct <= 90:
-                r1 = self._compress_old_logs(keep_hours=4)
-                combined["stages"].append({"action": "compress_logs", **r1})
-                r2 = self._compress_images(quality=60)
-                combined["stages"].append({"action": "compress_images", **r2})
-                # Try overflow move
-                if self._get_overflow_path():
-                    r3 = self._move_to_overflow()
-                    combined["stages"].append({"action": "overflow_move", **r3})
-                total = sum(s.get("saved_mb", 0) + s.get("freed_mb", 0) for s in combined["stages"])
-                combined["freed_mb"] = round(total, 2)
-                # Re-check if compression was enough
-                new_pct = 0.0
-                for mount in ["/", str(self.work_dir), "/img"]:
-                    try:
-                        u = shutil.disk_usage(mount)
-                        pct = u.used / u.total * 100 if u.total else 0
-                        if pct > new_pct:
-                            new_pct = pct
-                    except OSError:
-                        pass
-                if new_pct <= threshold_pct:
-                    return combined
-                # Compression wasn't enough, fall through to smart clean
-                # Keep at least 1 hour of recent files to protect active sessions
+            # Stage 1: Always try non-destructive methods first (compress + overflow)
+            r1 = self._compress_old_logs(keep_hours=4)
+            combined["stages"].append({"action": "compress_logs", **r1})
+            r2 = self._compress_images(quality=60)
+            combined["stages"].append({"action": "compress_images", **r2})
+            if self._get_overflow_path():
+                r3 = self._move_to_overflow()
+                combined["stages"].append({"action": "overflow_move", **r3})
+            total = sum(s.get("saved_mb", 0) + s.get("freed_mb", 0) for s in combined["stages"])
+            combined["freed_mb"] = round(total, 2)
+
+            # Re-check if non-destructive was enough
+            new_pct = 0.0
+            for mount in ["/", str(self.work_dir), "/img"]:
+                try:
+                    u = shutil.disk_usage(mount)
+                    pct = u.used / u.total * 100 if u.total else 0
+                    if pct > new_pct:
+                        new_pct = pct
+                except OSError:
+                    pass
+            if new_pct <= threshold_pct:
+                return combined
+
+            # Stage 2: Only escalate to smart_clean if disk is at 90%+ (user threshold)
+            # and non-destructive methods weren't sufficient.
+            # Use generous keep_hours to avoid deleting active session data.
+            if used_pct <= 95:
                 r4 = self._smart_clean(keep_hours=6)
                 combined["stages"].append({"action": "smart_clean", **r4})
                 combined["freed_mb"] = round(total + r4.get("freed_mb", 0), 2)
+                combined["deleted"] = r4.get("deleted", 0)
                 return combined
 
-            # Stage 2: High pressure – compress + smart clean (keep 1h minimum)
-            if used_pct <= 95:
-                self._compress_old_logs(keep_hours=1)
-                self._compress_images(quality=50)
-                if self._get_overflow_path():
-                    self._move_to_overflow()
-                # Always keep at least 1 hour of files to protect active session
-                return self._smart_clean(keep_hours=max(2, 1))
-
-            # Stage 3: Critical – compress everything then smart clean with 1h keep
-            # NOTE: Never use deep_clean in auto mode – it deletes ALL captures
-            # including active session files, which breaks the display.
-            self._compress_old_logs(keep_hours=0)
-            self._compress_images(quality=40)
+            # Stage 3: Critical (>95%) – compress harder then smart clean
+            # Still keep at least 3 hours of data to avoid corrupting active runs.
+            # NOTE: Never use deep_clean in auto mode – it would delete ALL captures
+            # including active session files and break station counting.
+            self._compress_old_logs(keep_hours=1)
+            self._compress_images(quality=45)
             if self._get_overflow_path():
                 self._move_to_overflow()
-            return self._smart_clean(keep_hours=1)
+            r5 = self._smart_clean(keep_hours=3)
+            combined["stages"].append({"action": "smart_clean_critical", **r5})
+            combined["freed_mb"] = round(total + r5.get("freed_mb", 0), 2)
+            combined["deleted"] = r5.get("deleted", 0)
+            return combined
         except Exception:
             return None
 
@@ -7536,6 +7557,10 @@ class EditorHandler(BaseHTTPRequestHandler):
                     continue
                 # Only compress text log files
                 if p.suffix not in (".jsonl", ".json", ".log", ".txt"):
+                    continue
+                # NEVER compress station/extract data – actively appended to
+                # during playback; compressing breaks loop counting
+                if self._is_station_data_file(p):
                     continue
                 try:
                     st = p.stat()

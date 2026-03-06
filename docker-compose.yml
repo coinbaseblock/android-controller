@@ -8,7 +8,7 @@ services:
     # storage-opt จำกัดขนาด writable layer ต่อ container (ต้องใช้ overlay2 + xfs backing)
     # ถ้า Docker Engine ไม่รองรับ ให้ comment บรรทัดนี้ออก
     storage_opt:
-      size: '50G'
+      size: '100G'
     # ถ้าใช้ ADB over Wi-Fi อย่างเดียว อาจเอา devices: ออกได้
     devices:
       - "/dev/bus/usb:/dev/bus/usb"
@@ -52,7 +52,7 @@ services:
       - adb-server
     shm_size: '2gb'
     storage_opt:
-      size: '50G'
+      size: '100G'
     # ใช้ network เดียวกับ adb-server เพื่อให้ 127.0.0.1 ของคอนเทนเนอร์นี้ ชี้ไปที่ adb-server
     network_mode: "service:adb-server"
     environment:
