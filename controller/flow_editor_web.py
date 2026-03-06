@@ -2919,6 +2919,9 @@ let _diskRefreshTimer = null;
 let _diskAutoCleanEnabled = localStorage.getItem('diskAutoCleanEnabled') === '1';
 let _diskAutoCleanThreshold = Number(localStorage.getItem('diskAutoCleanThreshold') || '85');
 let _lastAutoCleanAt = 0;
+let _autoCleanRunning = false;
+let _autoCleanConsecutive = 0;
+const _AUTO_CLEAN_MAX_CONSECUTIVE = 3;
 
 function _getDiskRefreshIntervalMs() {
   return _lastDiskPct > 95 ? 10000 : (_lastDiskPct > 90 ? 15000 : (_lastDiskPct > 80 ? 30000 : 60000));
@@ -2953,23 +2956,43 @@ function updateDiskAutoCleanThreshold(value) {
 }
 
 async function maybeAutoClean() {
-  if (!_diskAutoCleanEnabled || _lastDiskPct < _diskAutoCleanThreshold) return;
+  if (!_diskAutoCleanEnabled || _lastDiskPct < _diskAutoCleanThreshold) {
+    _autoCleanConsecutive = 0;
+    return;
+  }
+  // Prevent recursive calls (refreshDiskSpace -> maybeAutoClean -> refreshDiskSpace)
+  if (_autoCleanRunning) return;
+  // Prevent excessive consecutive cleanups that keep deleting active files
+  if (_autoCleanConsecutive >= _AUTO_CLEAN_MAX_CONSECUTIVE) {
+    // Reset after a longer cooldown (10 minutes)
+    const now = Date.now();
+    if (now - _lastAutoCleanAt < 600000) return;
+    _autoCleanConsecutive = 0;
+  }
   // Prevent spam cleanup calls while disk remains high.
   // Use shorter cooldown when disk is critical (>90%: 60s, >80%: 120s, else: 180s).
   const now = Date.now();
   const cooldownMs = _lastDiskPct > 90 ? 60000 : (_lastDiskPct > 80 ? 120000 : 180000);
   if (now - _lastAutoCleanAt < cooldownMs) return;
   _lastAutoCleanAt = now;
+  _autoCleanRunning = true;
   try {
     const res = await api('POST', '/auto-cleanup', { threshold_pct: _diskAutoCleanThreshold });
     if (res && res.ok && !res.skipped) {
-      toast('Auto Clean: deleted ' + res.deleted + ' files, freed ' + res.freed_mb + ' MB', 'success');
+      _autoCleanConsecutive++;
+      toast('Auto Clean: deleted ' + res.deleted + ' files, freed ' + res.freed_mb + ' MB (' + _autoCleanConsecutive + '/' + _AUTO_CLEAN_MAX_CONSECUTIVE + ')', 'success');
       refreshExtractLogs();
       refreshStationLogs();
-      await refreshDiskSpace();
+      // NOTE: Do NOT call refreshDiskSpace() here to avoid recursive loop.
+      // The next scheduled disk refresh will pick up the updated space.
+    } else {
+      // Cleanup was skipped or not needed, reset consecutive counter
+      _autoCleanConsecutive = 0;
     }
   } catch (e) {
     // keep UI responsive; skip noisy errors for background cleanup
+  } finally {
+    _autoCleanRunning = false;
   }
 }
 
@@ -7410,7 +7433,9 @@ class EditorHandler(BaseHTTPRequestHandler):
         cleanup based on the most constrained one.
 
         Strategy: try compression first to preserve data, then escalate to
-        deletion only when compression isn't enough.
+        smart_clean only (never deep_clean) to protect active session files.
+        Recent captures (< 1 hour) are always preserved to avoid breaking
+        the display of actively-running recordings.
         """
         try:
             # Check all relevant mount points, use the most constrained
@@ -7453,25 +7478,29 @@ class EditorHandler(BaseHTTPRequestHandler):
                 if new_pct <= threshold_pct:
                     return combined
                 # Compression wasn't enough, fall through to smart clean
+                # Keep at least 1 hour of recent files to protect active sessions
                 r4 = self._smart_clean(keep_hours=6)
                 combined["stages"].append({"action": "smart_clean", **r4})
                 combined["freed_mb"] = round(total + r4.get("freed_mb", 0), 2)
                 return combined
 
-            # Stage 2: High pressure – compress + aggressive clean
+            # Stage 2: High pressure – compress + smart clean (keep 1h minimum)
             if used_pct <= 95:
                 self._compress_old_logs(keep_hours=1)
                 self._compress_images(quality=50)
                 if self._get_overflow_path():
                     self._move_to_overflow()
-                return self._smart_clean(keep_hours=2)
+                # Always keep at least 1 hour of files to protect active session
+                return self._smart_clean(keep_hours=max(2, 1))
 
-            # Stage 3: Critical – compress everything then deep clean
+            # Stage 3: Critical – compress everything then smart clean with 1h keep
+            # NOTE: Never use deep_clean in auto mode – it deletes ALL captures
+            # including active session files, which breaks the display.
             self._compress_old_logs(keep_hours=0)
             self._compress_images(quality=40)
             if self._get_overflow_path():
                 self._move_to_overflow()
-            return self._deep_clean()
+            return self._smart_clean(keep_hours=1)
         except Exception:
             return None
 
