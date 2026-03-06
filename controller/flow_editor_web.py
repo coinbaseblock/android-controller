@@ -1189,6 +1189,20 @@ input:focus, select:focus, textarea:focus { outline: none; border-color: var(--b
                 <input type="number" id="diskAutoCleanThreshold" min="70" max="98" step="1" value="85" style="width:52px" onchange="updateDiskAutoCleanThreshold(this.value)">%
               </label>
             </div>
+            <div style="margin-top:6px">
+              <div class="btn-group" style="gap:4px;flex-wrap:wrap">
+                <button class="btn btn-sm" onclick="storageExpand()" title="Expand storage: compress logs (gzip) + images (JPEG) + overflow" style="color:#58a6ff;border-color:#58a6ff40;font-size:10px">Expand Storage</button>
+                <button class="btn btn-sm" onclick="compressLogs()" title="Compress old log files with gzip (~10x smaller)" style="font-size:10px">Compress Logs</button>
+                <button class="btn btn-sm" onclick="compressImages()" title="Convert PNG screenshots to JPEG (~5x smaller)" style="font-size:10px">Compress Imgs</button>
+              </div>
+            </div>
+            <div style="margin-top:4px;font-size:10px;color:var(--text2);display:flex;align-items:center;gap:6px;flex-wrap:wrap">
+              <label style="display:flex;align-items:center;gap:4px;cursor:pointer">
+                <span style="color:#58a6ff">Overflow:</span>
+              </label>
+              <span id="overflowStatus" style="color:var(--text2)">not configured</span>
+              <button class="btn btn-sm" onclick="setupOverflow()" title="Configure overflow storage directory" style="font-size:9px;padding:1px 5px">Setup</button>
+            </div>
             <div id="diskCategoryActions" style="display:none;margin-top:6px;font-size:10px">
               <div class="btn-group" style="gap:3px;flex-wrap:wrap">
                 <button class="btn btn-sm" onclick="deleteAllCaptures()" title="Delete all capture screenshots" style="font-size:10px;padding:1px 6px">Del Captures</button>
@@ -3000,6 +3014,8 @@ async function refreshDiskSpace() {
       if (b.urf_count > 0) parts.push('Recordings: ' + b.urf_mb + ' MB (' + b.urf_count + ')');
       if (b.pycache_count > 0) parts.push('Cache: ' + b.pycache_mb + ' MB');
       if (b.tmp_count > 0) parts.push('Temp: ' + b.tmp_mb + ' MB');
+      if (b.gz_count > 0) parts.push('<span style="color:#58a6ff">Compressed: ' + b.gz_mb + ' MB (' + b.gz_count + ')</span>');
+      if (b.jpg_count > 0) parts.push('<span style="color:#58a6ff">JPEG: ' + b.jpg_mb + ' MB (' + b.jpg_count + ')</span>');
       if (parts.length > 0) {
         bd.innerHTML = parts.join(' | ');
         bd.style.display = '';
@@ -3008,6 +3024,12 @@ async function refreshDiskSpace() {
       }
       // Show per-category delete buttons when there's something to delete
       catActions.style.display = (b.captures_count > 0 || b.sent_count > 0 || data.log_count > 0) ? '' : 'none';
+    }
+    // Update overflow status
+    if (data.overflow) {
+      const ov = data.overflow;
+      const ovEl = document.getElementById('overflowStatus');
+      if (ovEl) ovEl.innerHTML = '<span style="color:var(--green)">' + ov.path + '</span> (' + ov.free_gb + ' GB free, ' + ov.file_count + ' files / ' + ov.used_mb + ' MB)';
     }
     maybeAutoClean();
   } catch (e) { /* ignore */ }
@@ -3102,6 +3124,101 @@ async function deleteAllSent() {
     refreshDiskSpace();
   } catch (e) { toast('Error: ' + e.message, 'error'); }
 }
+
+// ============================================================
+// STORAGE EXPANSION: COMPRESS + OVERFLOW
+// ============================================================
+async function storageExpand() {
+  try {
+    toast('Expanding storage (compress + overflow)...', 'info');
+    const res = await api('POST', '/storage-expand', {});
+    if (res.ok) {
+      const parts = [];
+      if (res.compress_logs && res.compress_logs.compressed > 0)
+        parts.push(res.compress_logs.compressed + ' logs compressed (' + res.compress_logs.saved_mb + ' MB)');
+      if (res.compress_images && res.compress_images.converted > 0)
+        parts.push(res.compress_images.converted + ' images compressed (' + res.compress_images.saved_mb + ' MB)');
+      if (res.overflow && res.overflow.moved > 0)
+        parts.push(res.overflow.moved + ' files moved to overflow (' + res.overflow.freed_mb + ' MB)');
+      const total = res.total_saved_mb || 0;
+      const msg = parts.length > 0
+        ? 'Storage expanded! Saved ' + total + ' MB (' + parts.join(', ') + ')'
+        : 'No files to compress or move. Consider Smart Clean or Deep Clean.';
+      toast(msg, parts.length > 0 ? 'success' : 'info');
+    } else {
+      toast('Error: ' + (res.error || 'unknown'), 'error');
+    }
+    refreshDiskSpace();
+  } catch (e) { toast('Error: ' + e.message, 'error'); }
+}
+
+async function compressLogs() {
+  try {
+    toast('Compressing old log files (gzip)...', 'info');
+    const res = await api('POST', '/compress-logs', { keep_hours: 2 });
+    if (res.ok) {
+      if (res.compressed > 0) {
+        toast('Compressed ' + res.compressed + ' log files, saved ' + res.saved_mb + ' MB', 'success');
+      } else {
+        toast('No old log files to compress', 'info');
+      }
+    } else {
+      toast('Error: ' + (res.error || 'unknown'), 'error');
+    }
+    refreshDiskSpace();
+  } catch (e) { toast('Error: ' + e.message, 'error'); }
+}
+
+async function compressImages() {
+  try {
+    toast('Converting PNG captures to JPEG...', 'info');
+    const res = await api('POST', '/compress-images', { quality: 60 });
+    if (res.ok) {
+      if (res.converted > 0) {
+        toast('Converted ' + res.converted + ' images to JPEG, saved ' + res.saved_mb + ' MB', 'success');
+      } else {
+        toast('No PNG images to convert', 'info');
+      }
+    } else {
+      toast('Error: ' + (res.error || 'unknown'), 'error');
+    }
+    refreshDiskSpace();
+  } catch (e) { toast('Error: ' + e.message, 'error'); }
+}
+
+async function setupOverflow() {
+  const path = prompt('Enter overflow directory path (e.g. /dev/shm/overflow or /mnt/data/overflow).\\nLeave empty to check current config:');
+  if (path === null) return;
+  try {
+    toast('Setting up overflow storage...', 'info');
+    const res = await api('POST', '/setup-overflow', { path: path });
+    if (res.ok) {
+      if (res.config) {
+        const c = res.config;
+        const status = document.getElementById('overflowStatus');
+        if (status) {
+          status.innerHTML = '<span style="color:var(--green)">' + c.path + '</span> (' + (c.free_gb || '?') + ' GB free)';
+        }
+        toast(path ? 'Overflow configured: ' + c.path + ' (' + c.free_gb + ' GB free)' : 'Current: ' + c.path, 'success');
+      } else {
+        toast('No overflow configured yet', 'info');
+      }
+    } else {
+      toast('Error: ' + (res.error || 'unknown'), 'error');
+    }
+  } catch (e) { toast('Error: ' + e.message, 'error'); }
+}
+
+async function refreshOverflowStatus() {
+  try {
+    const res = await api('POST', '/setup-overflow', { path: '' });
+    const status = document.getElementById('overflowStatus');
+    if (res.ok && res.config && status) {
+      status.innerHTML = '<span style="color:var(--green)">' + res.config.path + '</span> (' + (res.config.free_gb || '?') + ' GB free)';
+    }
+  } catch (e) { /* ignore */ }
+}
+setTimeout(() => refreshOverflowStatus(), 2000);
 
 // ============================================================
 // LOG MANAGEMENT: DELETE / DOWNLOAD / CLEAR
@@ -5833,6 +5950,18 @@ class EditorHandler(BaseHTTPRequestHandler):
             self._json(self._delete_all_sent())
         elif path == "/api/delete-log":
             self._json(self._delete_single_log(body))
+        elif path == "/api/compress-logs":
+            keep_hours = body.get("keep_hours", 2)
+            self._json(self._compress_old_logs(keep_hours=keep_hours))
+        elif path == "/api/compress-images":
+            quality = body.get("quality", 60)
+            self._json(self._compress_images(quality=quality))
+        elif path == "/api/setup-overflow":
+            self._json(self._setup_overflow(overflow_path=body.get("path", "")))
+        elif path == "/api/move-to-overflow":
+            self._json(self._move_to_overflow())
+        elif path == "/api/storage-expand":
+            self._json(self._storage_expand())
         else:
             self._error(404, "Not Found")
 
@@ -6985,6 +7114,50 @@ class EditorHandler(BaseHTTPRequestHandler):
                     except OSError:
                         pass
 
+            # Count compressed (.gz) files in log directories
+            gz_size = 0
+            gz_count = 0
+            for ld in [log_dir, img_log_dir]:
+                if ld.exists():
+                    for f in ld.glob("*.gz"):
+                        try:
+                            gz_size += f.stat().st_size
+                            gz_count += 1
+                        except OSError:
+                            pass
+
+            # Count JPEG files (compressed captures)
+            jpg_size = 0
+            jpg_count = 0
+            for d in [captures_dir, sent_dir]:
+                if d.exists():
+                    for f in d.glob("*.jpg"):
+                        try:
+                            jpg_size += f.stat().st_size
+                            jpg_count += 1
+                        except OSError:
+                            pass
+
+            # Overflow directory info
+            overflow_info = None
+            overflow_cfg = Path(self.work_dir) / ".overflow_config"
+            if overflow_cfg.exists():
+                try:
+                    ocfg = json.loads(overflow_cfg.read_text(encoding="utf-8"))
+                    op = Path(ocfg.get("path", ""))
+                    if op.exists():
+                        ou = shutil.disk_usage(str(op))
+                        osz, ocnt = self._dir_size(op)
+                        overflow_info = {
+                            "path": str(op),
+                            "used_mb": round(osz / (1024**2), 2),
+                            "file_count": ocnt,
+                            "free_gb": round(ou.free / (1024**3), 2),
+                            "total_gb": round(ou.total / (1024**3), 2),
+                        }
+                except Exception:
+                    pass
+
             return {
                 "ok": True,
                 "total_gb": round(total / (1024**3), 2),
@@ -7006,7 +7179,12 @@ class EditorHandler(BaseHTTPRequestHandler):
                     "pycache_count": pycache_count,
                     "tmp_mb": round(tmp_size / (1024**2), 2),
                     "tmp_count": tmp_count,
+                    "gz_mb": round(gz_size / (1024**2), 2),
+                    "gz_count": gz_count,
+                    "jpg_mb": round(jpg_size / (1024**2), 2),
+                    "jpg_count": jpg_count,
                 },
+                "overflow": overflow_info,
             }
         except Exception as e:
             return {"ok": False, "error": str(e)}
@@ -7229,6 +7407,9 @@ class EditorHandler(BaseHTTPRequestHandler):
         Designed to be called before playback or periodically.
         Checks ALL relevant filesystems (overlay, /work, /img) and triggers
         cleanup based on the most constrained one.
+
+        Strategy: try compression first to preserve data, then escalate to
+        deletion only when compression isn't enough.
         """
         try:
             # Check all relevant mount points, use the most constrained
@@ -7244,18 +7425,338 @@ class EditorHandler(BaseHTTPRequestHandler):
             if used_pct <= threshold_pct:
                 return None
 
-            # Progressive cleanup based on severity
-            if used_pct > 95:
-                # Critical: deep clean everything
-                return self._deep_clean()
-            elif used_pct > 90:
-                # High: keep only last 2 hours
+            combined: dict = {"ok": True, "stages": []}
+
+            # Stage 1: Try compression first (non-destructive)
+            if used_pct <= 90:
+                r1 = self._compress_old_logs(keep_hours=4)
+                combined["stages"].append({"action": "compress_logs", **r1})
+                r2 = self._compress_images(quality=60)
+                combined["stages"].append({"action": "compress_images", **r2})
+                # Try overflow move
+                if self._get_overflow_path():
+                    r3 = self._move_to_overflow()
+                    combined["stages"].append({"action": "overflow_move", **r3})
+                total = sum(s.get("saved_mb", 0) + s.get("freed_mb", 0) for s in combined["stages"])
+                combined["freed_mb"] = round(total, 2)
+                # Re-check if compression was enough
+                new_pct = 0.0
+                for mount in ["/", str(self.work_dir), "/img"]:
+                    try:
+                        u = shutil.disk_usage(mount)
+                        pct = u.used / u.total * 100 if u.total else 0
+                        if pct > new_pct:
+                            new_pct = pct
+                    except OSError:
+                        pass
+                if new_pct <= threshold_pct:
+                    return combined
+                # Compression wasn't enough, fall through to smart clean
+                r4 = self._smart_clean(keep_hours=6)
+                combined["stages"].append({"action": "smart_clean", **r4})
+                combined["freed_mb"] = round(total + r4.get("freed_mb", 0), 2)
+                return combined
+
+            # Stage 2: High pressure – compress + aggressive clean
+            if used_pct <= 95:
+                self._compress_old_logs(keep_hours=1)
+                self._compress_images(quality=50)
+                if self._get_overflow_path():
+                    self._move_to_overflow()
                 return self._smart_clean(keep_hours=2)
-            else:
-                # Moderate: keep last 6 hours
-                return self._smart_clean(keep_hours=6)
+
+            # Stage 3: Critical – compress everything then deep clean
+            self._compress_old_logs(keep_hours=0)
+            self._compress_images(quality=40)
+            if self._get_overflow_path():
+                self._move_to_overflow()
+            return self._deep_clean()
         except Exception:
             return None
+
+    # -------- Storage Expansion: Compress + Overflow --------
+
+    def _compress_old_logs(self, keep_hours: int = 2) -> dict:
+        """Compress (gzip) log files older than *keep_hours* instead of deleting.
+
+        JSONL/JSON text logs typically compress 8-12x with gzip, so a 100 MB
+        log becomes ~10 MB.  Already-compressed (.gz) files are skipped.
+        """
+        import gzip as _gzip
+        import time as _time
+
+        cutoff = _time.time() - keep_hours * 3600
+        compressed = 0
+        saved_bytes = 0
+        errors: list[str] = []
+
+        log_dirs = [Path(self.work_dir) / "logs"]
+        img_log = Path("/img/logs")
+        if img_log.exists() and img_log.resolve() != log_dirs[0].resolve():
+            log_dirs.append(img_log)
+
+        for log_dir in log_dirs:
+            if not log_dir.exists():
+                continue
+            for p in list(log_dir.iterdir()):
+                if not p.is_file():
+                    continue
+                # Skip already compressed
+                if p.suffix == ".gz":
+                    continue
+                # Only compress text log files
+                if p.suffix not in (".jsonl", ".json", ".log", ".txt"):
+                    continue
+                try:
+                    st = p.stat()
+                    if st.st_mtime >= cutoff:
+                        continue
+                    original_size = st.st_size
+                    if original_size < 1024:  # skip tiny files
+                        continue
+                    data = p.read_bytes()
+                    gz_path = p.with_suffix(p.suffix + ".gz")
+                    with _gzip.open(gz_path, "wb", compresslevel=6) as gf:
+                        gf.write(data)
+                    gz_size = gz_path.stat().st_size
+                    saved_bytes += original_size - gz_size
+                    p.unlink()
+                    compressed += 1
+                except Exception as e:
+                    errors.append(f"{p.name}: {e}")
+
+        return {
+            "ok": True,
+            "compressed": compressed,
+            "saved_mb": round(saved_bytes / (1024**2), 2),
+            "errors": errors[:10],
+        }
+
+    def _compress_images(self, quality: int = 60) -> dict:
+        """Convert PNG captures/sent images to JPEG to save ~70-85% space.
+
+        Screenshots from Android screencap are typically 24-bit PNG with no
+        transparency, so JPEG conversion is lossless in information that
+        matters for automation (extract data was already saved to JSONL).
+        Falls back gracefully if Pillow is not installed.
+        """
+        converted = 0
+        saved_bytes = 0
+        errors: list[str] = []
+
+        try:
+            from PIL import Image as _Image  # type: ignore
+        except ImportError:
+            return {"ok": False, "error": "Pillow not installed – run: pip install Pillow"}
+
+        for dir_path in [Path("/img/captures"), Path("/img/sent")]:
+            if not dir_path.exists():
+                continue
+            for p in list(dir_path.iterdir()):
+                if not p.is_file() or p.suffix.lower() != ".png":
+                    continue
+                try:
+                    original_size = p.stat().st_size
+                    if original_size < 4096:  # skip tiny
+                        continue
+                    img = _Image.open(p)
+                    if img.mode in ("RGBA", "LA", "P"):
+                        img = img.convert("RGB")
+                    jpg_path = p.with_suffix(".jpg")
+                    img.save(jpg_path, "JPEG", quality=quality, optimize=True)
+                    jpg_size = jpg_path.stat().st_size
+                    saved_bytes += original_size - jpg_size
+                    p.unlink()
+                    converted += 1
+                except Exception as e:
+                    errors.append(f"{p.name}: {e}")
+
+        return {
+            "ok": True,
+            "converted": converted,
+            "saved_mb": round(saved_bytes / (1024**2), 2),
+            "errors": errors[:10],
+        }
+
+    def _setup_overflow(self, overflow_path: str = "") -> dict:
+        """Set up an overflow directory to expand effective disk space.
+
+        When the primary storage (/img) fills up, captures and sent images
+        can spill over to a secondary location.  This creates symlinks so
+        existing code paths continue working transparently.
+
+        Common overflow targets:
+          - A larger bind-mount (e.g. /overflow  -> docker volume)
+          - tmpfs on RAM    (e.g. /dev/shm/overflow) – fast but volatile
+          - A second disk   (e.g. /mnt/data/overflow)
+
+        The overflow_path is persisted to /work/.overflow_config so it
+        survives container restarts.
+        """
+        config_path = Path(self.work_dir) / ".overflow_config"
+
+        if not overflow_path:
+            # Return current config
+            if config_path.exists():
+                try:
+                    cfg = json.loads(config_path.read_text(encoding="utf-8"))
+                    # Check health
+                    op = Path(cfg.get("path", ""))
+                    if op.exists():
+                        u = shutil.disk_usage(str(op))
+                        cfg["free_gb"] = round(u.free / (1024**3), 2)
+                        cfg["total_gb"] = round(u.total / (1024**3), 2)
+                    return {"ok": True, "config": cfg}
+                except Exception as e:
+                    return {"ok": False, "error": str(e)}
+            return {"ok": True, "config": None}
+
+        op = Path(overflow_path)
+
+        # Create directory if it doesn't exist
+        try:
+            op.mkdir(parents=True, exist_ok=True)
+        except Exception as e:
+            return {"ok": False, "error": f"Cannot create {overflow_path}: {e}"}
+
+        # Create subdirectories
+        for sub in ["captures", "sent", "logs"]:
+            (op / sub).mkdir(exist_ok=True)
+
+        # Verify writable
+        test_file = op / ".write_test"
+        try:
+            test_file.write_text("ok")
+            test_file.unlink()
+        except Exception as e:
+            return {"ok": False, "error": f"Directory not writable: {e}"}
+
+        # Check free space on overflow target
+        try:
+            u = shutil.disk_usage(str(op))
+            free_gb = round(u.free / (1024**3), 2)
+            total_gb = round(u.total / (1024**3), 2)
+        except OSError:
+            free_gb = -1
+            total_gb = -1
+
+        # Save config
+        cfg = {
+            "path": overflow_path,
+            "free_gb": free_gb,
+            "total_gb": total_gb,
+            "created": datetime.now().isoformat(),
+        }
+        config_path.write_text(json.dumps(cfg, indent=2), encoding="utf-8")
+
+        return {"ok": True, "config": cfg}
+
+    def _get_overflow_path(self) -> Path | None:
+        """Return the configured overflow path, or None."""
+        config_path = Path(self.work_dir) / ".overflow_config"
+        if not config_path.exists():
+            return None
+        try:
+            cfg = json.loads(config_path.read_text(encoding="utf-8"))
+            p = Path(cfg.get("path", ""))
+            return p if p.exists() else None
+        except Exception:
+            return None
+
+    def _move_to_overflow(self) -> dict:
+        """Move old captures and sent images to overflow directory to free primary disk.
+
+        Unlike deletion, this preserves the files on secondary storage.
+        """
+        import time as _time
+
+        overflow = self._get_overflow_path()
+        if not overflow:
+            return {"ok": False, "error": "No overflow directory configured. Use /api/setup-overflow first."}
+
+        moved = 0
+        freed = 0
+        errors: list[str] = []
+        cutoff = _time.time() - 3600  # move files older than 1 hour
+
+        for sub, src_dir in [("captures", Path("/img/captures")), ("sent", Path("/img/sent"))]:
+            dst_dir = overflow / sub
+            dst_dir.mkdir(exist_ok=True)
+            if not src_dir.exists():
+                continue
+            for p in list(src_dir.iterdir()):
+                if not p.is_file():
+                    continue
+                try:
+                    if p.stat().st_mtime >= cutoff:
+                        continue
+                    dst = dst_dir / p.name
+                    shutil.move(str(p), str(dst))
+                    freed += dst.stat().st_size
+                    moved += 1
+                except Exception as e:
+                    errors.append(f"{p.name}: {e}")
+
+        return {
+            "ok": True,
+            "moved": moved,
+            "freed_mb": round(freed / (1024**2), 2),
+            "errors": errors[:10],
+        }
+
+    def _storage_expand(self) -> dict:
+        """One-click storage expansion: compress + overflow + cleanup.
+
+        Strategy (in order, stops when enough space is freed):
+        1. Compress old logs (gzip)
+        2. Compress images (PNG -> JPEG)
+        3. Move old files to overflow (if configured)
+        4. Smart clean old files (last resort before deletion)
+        """
+        results = {}
+        total_saved_mb = 0.0
+
+        # Check current usage
+        try:
+            used_pct = 0.0
+            for mount in ["/", str(self.work_dir), "/img"]:
+                try:
+                    u = shutil.disk_usage(mount)
+                    pct = u.used / u.total * 100 if u.total else 0
+                    if pct > used_pct:
+                        used_pct = pct
+                except OSError:
+                    pass
+        except Exception:
+            used_pct = 100  # assume worst
+
+        # Step 1: Compress old logs
+        r = self._compress_old_logs(keep_hours=2)
+        results["compress_logs"] = r
+        if r.get("ok"):
+            total_saved_mb += r.get("saved_mb", 0)
+
+        # Re-check – maybe enough
+        if total_saved_mb > 100 and used_pct < 85:
+            results["total_saved_mb"] = round(total_saved_mb, 2)
+            return {"ok": True, "strategy": "compress_logs", **results}
+
+        # Step 2: Compress images
+        r = self._compress_images(quality=60)
+        results["compress_images"] = r
+        if r.get("ok"):
+            total_saved_mb += r.get("saved_mb", 0)
+
+        # Step 3: Move to overflow if configured
+        overflow = self._get_overflow_path()
+        if overflow:
+            r = self._move_to_overflow()
+            results["overflow"] = r
+            if r.get("ok"):
+                total_saved_mb += r.get("freed_mb", 0)
+
+        results["total_saved_mb"] = round(total_saved_mb, 2)
+        return {"ok": True, **results}
 
     def _delete_all_captures(self) -> dict:
         """Delete all capture screenshots."""

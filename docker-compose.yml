@@ -21,6 +21,10 @@ services:
       - "D:/android-controller/adbkeys:/root/.android"
       - "D:/android-controller/data:/work"
       - "D:/android-controller/img:/img"
+      # Overflow storage: เมื่อ /img เต็ม ไฟล์จะถูกย้ายมาที่นี่อัตโนมัติ
+      # ใช้ดิสก์ลูกอื่น หรือ NAS path เพื่อขยายพื้นที่ได้
+      # ตัวอย่าง: - "E:/android-overflow:/overflow"
+      # แล้วตั้งค่า overflow path = /overflow ผ่าน Web UI
     # tmpfs: ย้าย temp/cache ไปใช้ RAM เพื่อไม่กินพื้นที่ดิสก์ overlay
     tmpfs:
       - /tmp:size=2G
@@ -62,6 +66,8 @@ services:
       - "D:/android-controller/adbkeys:/root/.android"
       - "D:/android-controller/data:/work"
       - "D:/android-controller/img:/img"
+      # Overflow storage: เหมือน adb-server ข้างบน
+      # ตัวอย่าง: - "E:/android-overflow:/overflow"
     tmpfs:
       - /tmp:size=2G
       - /var/tmp:size=1G
