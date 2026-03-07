@@ -27,7 +27,7 @@ services:
     # tmpfs: ย้าย temp/cache ไปใช้ RAM เพื่อไม่กินพื้นที่ดิสก์ overlay
     tmpfs:
       - /tmp:size=8G
-      - /var/tmp:size=4G
+      - /var/tmp:size=8G
     ports:
       - "5037:5037"
       - "8080:8080"   # Debug dashboard for automation engine
@@ -70,7 +70,7 @@ services:
       - "D:/android-controller/overflow:/overflow"
     tmpfs:
       - /tmp:size=8G
-      - /var/tmp:size=4G
+      - /var/tmp:size=8G
     command: |
       bash -lc '
         echo "controller ready; env:"
