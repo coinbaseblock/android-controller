@@ -1065,6 +1065,10 @@ input:focus, select:focus, textarea:focus { outline: none; border-color: var(--b
     <button class="btn btn-sm btn-primary" onclick="saveFile()">Save</button>
     <button class="btn btn-sm" onclick="saveAsFile()">Save As</button>
     <button class="btn btn-sm" onclick="exportScript()">Export Script</button>
+    <div class="sep" style="width:1px;height:24px;background:var(--border);margin:0 4px"></div>
+    <button class="btn btn-sm" onclick="exportToHDD()" title="Download current recording to your computer" style="color:#d29922;border-color:#d2992240">Export HDD</button>
+    <button class="btn btn-sm" onclick="document.getElementById('importFileInput').click()" title="Import a .urf.json file from your computer" style="color:#3fb950;border-color:#3fb95040">Import HDD</button>
+    <input type="file" id="importFileInput" accept=".json,.urf.json" multiple style="display:none" onchange="importFromHDD(event)">
   </div>
 
   <div class="main">
@@ -1795,6 +1799,72 @@ async function exportScript() {
   exported.meta.recording_mode = 'script';
   const res = await api('POST', '/save', {path: dir+'/'+name, recording: exported});
   if (res.ok) { loadFileList(); toast('Exported!', 'success'); }
+}
+
+// ============================================================
+// EXPORT / IMPORT HDD
+// ============================================================
+function exportToHDD() {
+  if (!recording) { toast('No recording to export', 'error'); return; }
+  updateMetaFromUI();
+  updateSettingsFromUI();
+  const data = JSON.stringify(recording, null, 2);
+  const blob = new Blob([data], {type: 'application/json'});
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  const name = filePath ? filePath.split('/').pop() : 'recording.urf.json';
+  a.download = name;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+  toast('Downloaded: ' + name, 'success');
+}
+
+async function importFromHDD(event) {
+  const files = event.target.files;
+  if (!files || files.length === 0) return;
+  let importedCount = 0;
+  for (const file of files) {
+    try {
+      const text = await file.text();
+      const data = JSON.parse(text);
+      // Validate it's a recording format
+      if (!data.frames && !(Array.isArray(data) && data.length && data[0].timestamp)) {
+        toast('Invalid format: ' + file.name, 'error');
+        continue;
+      }
+      // Save to work directory via API
+      const dir = filePath ? filePath.substring(0, filePath.lastIndexOf('/')) : '/work';
+      let fname = file.name;
+      if (!fname.endsWith('.urf.json') && !fname.endsWith('.json')) fname += '.urf.json';
+      const res = await api('POST', '/import-hdd', {filename: fname, dir: dir, data: data});
+      if (res.ok) {
+        importedCount++;
+        if (files.length === 1) {
+          // Load the imported file directly
+          const loadRes = await api('GET', '/load?path=' + encodeURIComponent(res.path));
+          if (loadRes && !loadRes.error) {
+            recording = loadRes;
+            filePath = res.path;
+            document.getElementById('fileName').textContent = fname;
+            refreshAll();
+          }
+        }
+      } else {
+        toast('Import failed: ' + (res.error || file.name), 'error');
+      }
+    } catch(e) {
+      toast('Error reading: ' + file.name + ' - ' + e.message, 'error');
+    }
+  }
+  if (importedCount > 0) {
+    await loadFileList();
+    toast('Imported ' + importedCount + ' file(s)', 'success');
+  }
+  // Reset file input so same file can be re-imported
+  event.target.value = '';
 }
 
 // ============================================================
@@ -5943,6 +6013,8 @@ class EditorHandler(BaseHTTPRequestHandler):
 
         if path == "/api/save":
             self._json(self._save_file(body))
+        elif path == "/api/import-hdd":
+            self._json(self._import_from_hdd(body))
         elif path == "/api/collapse":
             self._json(self._collapse(body))
         elif path == "/api/hover-log":
@@ -6116,6 +6188,34 @@ class EditorHandler(BaseHTTPRequestHandler):
                 rec_data.setdefault("meta", {})["total_duration_ms"] = max(f.get("t", 0) for f in frames)
             p.write_text(json.dumps(rec_data, indent=2, ensure_ascii=False), encoding="utf-8")
             return {"ok": True}
+        except Exception as e:
+            return {"error": str(e)}
+
+    def _import_from_hdd(self, body: dict) -> dict:
+        """Import a recording file uploaded from the user's computer."""
+        filename = body.get("filename", "")
+        directory = body.get("dir", self.work_dir)
+        data = body.get("data")
+        if not filename or data is None:
+            return {"error": "Missing filename or data"}
+        # Sanitize filename - only allow safe characters
+        safe_name = _re.sub(r'[^\w\-. ]', '_', filename)
+        if not safe_name.endswith('.json'):
+            safe_name += '.urf.json'
+        dest = Path(directory) / safe_name
+        # Avoid overwriting - add suffix if file exists
+        if dest.exists():
+            base = dest.name
+            stem = base.rsplit('.urf.json', 1)[0] if base.endswith('.urf.json') else base.rsplit('.json', 1)[0]
+            suffix = '.urf.json' if base.endswith('.urf.json') else '.json'
+            counter = 1
+            while dest.exists():
+                dest = Path(directory) / f"{stem}_{counter}{suffix}"
+                counter += 1
+        try:
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            dest.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
+            return {"ok": True, "path": str(dest), "filename": dest.name}
         except Exception as e:
             return {"error": str(e)}
 
