@@ -2917,7 +2917,7 @@ setInterval(() => refreshStationLogs(), 10000);
 let _lastDiskPct = 0;
 let _diskRefreshTimer = null;
 let _diskAutoCleanEnabled = localStorage.getItem('diskAutoCleanEnabled') === '1';
-let _diskAutoCleanThreshold = Number(localStorage.getItem('diskAutoCleanThreshold') || '80');
+let _diskAutoCleanThreshold = Number(localStorage.getItem('diskAutoCleanThreshold') || '95');
 let _lastAutoCleanAt = 0;
 let _autoCleanRunning = false;
 let _autoCleanConsecutive = 0;
@@ -5964,7 +5964,7 @@ class EditorHandler(BaseHTTPRequestHandler):
             keep_hours = body.get("keep_hours", 6)
             self._json(self._smart_clean(keep_hours=keep_hours))
         elif path == "/api/auto-cleanup":
-            threshold = body.get("threshold_pct", 80.0)
+            threshold = body.get("threshold_pct", 95.0)
             result = self._auto_cleanup(threshold_pct=threshold)
             self._json(result or {"ok": True, "skipped": True, "reason": "Disk usage below threshold"})
         elif path == "/api/delete-all-captures":
@@ -7439,7 +7439,7 @@ class EditorHandler(BaseHTTPRequestHandler):
             "errors": errors[:10],
         }
 
-    def _auto_cleanup(self, threshold_pct: float = 80.0) -> dict | None:
+    def _auto_cleanup(self, threshold_pct: float = 95.0) -> dict | None:
         """Auto-cleanup when disk usage exceeds threshold.
 
         Returns cleanup result dict if cleanup was performed, None if not needed.
@@ -7448,17 +7448,17 @@ class EditorHandler(BaseHTTPRequestHandler):
         cleanup based on the most constrained one.
 
         IMPORTANT: Auto-cleanup ONLY triggers when disk usage >= threshold_pct
-        (configured by user, default 80%).  It NEVER deletes extract logs
+        (configured by user, default 95%).  It NEVER deletes extract logs
         (*-extract.jsonl) or playback logs (*-playback.json) because those
         contain station counting data that must be preserved for accurate
         loop/station tracking.  The charger-view export depends on these
         JSONL files, NOT on capture images.
 
         Strategy (escalating):
-        1. Non-destructive: compress logs, compress images (q=45), overflow
-        2. Targeted: delete old JPEG captures (>2h) – data already in JSONL
+        1. Non-destructive: compress logs, move to overflow (PNG kept as-is)
+        2. Targeted: delete old PNG captures (>4h) – data already in JSONL
         3. 90-95%: smart_clean old captures/sent (keep 4h)
-        4. Above 95%: compress everything + smart_clean (keep 2h minimum)
+        4. Above 95%: compress logs + smart_clean (keep 2h minimum)
         Never uses deep_clean.  Never deletes station/extract data.
         """
         try:
@@ -7493,11 +7493,11 @@ class EditorHandler(BaseHTTPRequestHandler):
             if new_pct <= threshold_pct:
                 return combined
 
-            # Stage 2: Targeted cleanup – delete old JPEG captures (>2h) only.
+            # Stage 2: Targeted cleanup – delete old PNG/JPEG captures (>4h) only.
             # Extract data is already saved in JSONL logs, so capture images
             # are only useful for visual debugging.  This frees significant
             # space without affecting charger-view export or station data.
-            r_targeted = self._cleanup_old_captures(keep_hours=2)
+            r_targeted = self._cleanup_old_captures(keep_hours=4)
             combined["stages"].append({"action": "cleanup_old_captures", **r_targeted})
             total += r_targeted.get("freed_mb", 0)
             combined["freed_mb"] = round(total, 2)
@@ -7544,16 +7544,16 @@ class EditorHandler(BaseHTTPRequestHandler):
                 pass
         return max_pct
 
-    def _cleanup_old_captures(self, keep_hours: int = 2) -> dict:
-        """Delete old JPEG/PNG capture images while preserving extract logs.
+    def _cleanup_old_captures(self, keep_hours: int = 4) -> dict:
+        """Delete old PNG/JPEG capture images while preserving extract logs.
 
         This is a targeted cleanup that only removes capture *images* older
-        than keep_hours.  All extract JSONL logs are preserved so the
-        charger-view export continues to work with full historical data.
+        than keep_hours (default 4h).  All extract JSONL logs are preserved
+        so the charger-view export continues to work with full historical data.
 
         This is more efficient than smart_clean because it targets only the
-        largest space consumer (JPEG captures ~125 KB each) without touching
-        logs, recordings, or other files.
+        largest space consumer (PNG captures) without touching logs,
+        recordings, or other files.
         """
         import time
 
@@ -7650,51 +7650,17 @@ class EditorHandler(BaseHTTPRequestHandler):
         }
 
     def _compress_images(self, quality: int = 45) -> dict:
-        """Convert PNG captures/sent images to JPEG to save ~80-90% space.
+        """Keep PNG captures as-is (no JPEG conversion).
 
-        Screenshots from Android screencap are typically 24-bit PNG with no
-        transparency, so JPEG conversion is lossless in information that
-        matters for automation (extract data was already saved to JSONL).
-        Quality 45 is sufficient for visual debugging; all actual data
-        is preserved in the JSONL extract logs used by charger-view export.
-        Falls back gracefully if Pillow is not installed.
+        PNG format is preserved per configuration. Space is managed by
+        periodic cleanup (deleting old captures) and moving to HDD/overflow
+        instead of lossy format conversion.
         """
-        converted = 0
-        saved_bytes = 0
-        errors: list[str] = []
-
-        try:
-            from PIL import Image as _Image  # type: ignore
-        except ImportError:
-            return {"ok": False, "error": "Pillow not installed – run: pip install Pillow"}
-
-        for dir_path in [Path("/img/captures"), Path("/img/sent")]:
-            if not dir_path.exists():
-                continue
-            for p in list(dir_path.iterdir()):
-                if not p.is_file() or p.suffix.lower() != ".png":
-                    continue
-                try:
-                    original_size = p.stat().st_size
-                    if original_size < 4096:  # skip tiny
-                        continue
-                    img = _Image.open(p)
-                    if img.mode in ("RGBA", "LA", "P"):
-                        img = img.convert("RGB")
-                    jpg_path = p.with_suffix(".jpg")
-                    img.save(jpg_path, "JPEG", quality=quality, optimize=True)
-                    jpg_size = jpg_path.stat().st_size
-                    saved_bytes += original_size - jpg_size
-                    p.unlink()
-                    converted += 1
-                except Exception as e:
-                    errors.append(f"{p.name}: {e}")
-
         return {
             "ok": True,
-            "converted": converted,
-            "saved_mb": round(saved_bytes / (1024**2), 2),
-            "errors": errors[:10],
+            "converted": 0,
+            "saved_mb": 0,
+            "errors": [],
         }
 
     def _setup_overflow(self, overflow_path: str = "") -> dict:
@@ -7771,16 +7737,24 @@ class EditorHandler(BaseHTTPRequestHandler):
         return {"ok": True, "config": cfg}
 
     def _get_overflow_path(self) -> Path | None:
-        """Return the configured overflow path, or None."""
+        """Return the configured overflow path, or None.
+
+        Falls back to /overflow if it exists (HDD mount from docker-compose).
+        """
         config_path = Path(self.work_dir) / ".overflow_config"
-        if not config_path.exists():
-            return None
-        try:
-            cfg = json.loads(config_path.read_text(encoding="utf-8"))
-            p = Path(cfg.get("path", ""))
-            return p if p.exists() else None
-        except Exception:
-            return None
+        if config_path.exists():
+            try:
+                cfg = json.loads(config_path.read_text(encoding="utf-8"))
+                p = Path(cfg.get("path", ""))
+                if p.exists():
+                    return p
+            except Exception:
+                pass
+        # Default: use /overflow HDD mount if available
+        default = Path("/overflow")
+        if default.exists():
+            return default
+        return None
 
     def _move_to_overflow(self) -> dict:
         """Move old captures and sent images to overflow directory to free primary disk.
@@ -7828,9 +7802,8 @@ class EditorHandler(BaseHTTPRequestHandler):
 
         Strategy (in order, stops when enough space is freed):
         1. Compress old logs (gzip)
-        2. Compress images (PNG -> JPEG)
-        3. Move old files to overflow (if configured)
-        4. Smart clean old files (last resort before deletion)
+        2. Move old files to overflow/HDD (if configured)
+        3. Smart clean old files (last resort before deletion)
         """
         results = {}
         total_saved_mb = 0.0
