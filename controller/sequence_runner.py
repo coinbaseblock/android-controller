@@ -178,6 +178,14 @@ class SequenceRunner:
             return p
         return None
 
+    @staticmethod
+    def _is_cross_filesystem_move(src_path: Path, dst_root: Path) -> bool:
+        """True when moving src_path -> dst_root can actually free source filesystem space."""
+        try:
+            return src_path.stat().st_dev != dst_root.stat().st_dev
+        except OSError:
+            return False
+
     def _archive_loop_captures(self, loop_idx: int) -> int:
         """Archive captures from a completed loop to HDD organized by date/loop.
 
@@ -190,6 +198,11 @@ class SequenceRunner:
         """
         overflow = self._get_overflow_root()
         if overflow is None:
+            return 0
+
+        # Moving within the same filesystem does not free disk space.
+        # Skip archive move in that case so other cleanup paths can run.
+        if not self._is_cross_filesystem_move(Path("/img"), overflow):
             return 0
 
         today = datetime.now().strftime("%Y-%m-%d")
@@ -234,6 +247,11 @@ class SequenceRunner:
         """
         overflow = self._get_overflow_root()
         if overflow is None:
+            return 0
+
+        # If overflow is on the same filesystem as /img, moving files will
+        # not reclaim space. Signal no-op so callers can escalate to deletion.
+        if not self._is_cross_filesystem_move(Path("/img"), overflow):
             return 0
 
         freed = 0

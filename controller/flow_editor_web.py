@@ -7407,7 +7407,7 @@ class EditorHandler(BaseHTTPRequestHandler):
         # Check for overflow/HDD to move protected files there
         overflow = self._get_overflow_path()
         overflow_logs = None
-        if overflow:
+        if overflow and self._is_cross_filesystem_move(Path("/img"), overflow):
             overflow_logs = overflow / "logs"
             overflow_logs.mkdir(exist_ok=True)
 
@@ -7445,7 +7445,7 @@ class EditorHandler(BaseHTTPRequestHandler):
         cap_del = 0
         cap_moved = 0
         overflow_caps = None
-        if overflow:
+        if overflow and self._is_cross_filesystem_move(Path("/img"), overflow):
             overflow_caps = overflow / "captures"
             overflow_caps.mkdir(exist_ok=True)
         if cap_dir.exists():
@@ -7471,7 +7471,7 @@ class EditorHandler(BaseHTTPRequestHandler):
         sent_del = 0
         sent_moved = 0
         overflow_sent = None
-        if overflow:
+        if overflow and self._is_cross_filesystem_move(Path("/img"), overflow):
             overflow_sent = overflow / "sent"
             overflow_sent.mkdir(exist_ok=True)
         if sent_dir.exists():
@@ -7589,7 +7589,7 @@ class EditorHandler(BaseHTTPRequestHandler):
         # Station/extract data files: move to overflow if available, else skip
         overflow = self._get_overflow_path()
         overflow_logs = None
-        if overflow:
+        if overflow and self._is_cross_filesystem_move(Path("/img"), overflow):
             overflow_logs = overflow / "logs"
             overflow_logs.mkdir(exist_ok=True)
 
@@ -7980,6 +7980,15 @@ class EditorHandler(BaseHTTPRequestHandler):
 
         return {"ok": True, "config": cfg}
 
+
+    @staticmethod
+    def _is_cross_filesystem_move(src_path: Path, dst_root: Path) -> bool:
+        """True when moving src_path -> dst_root can free source disk space."""
+        try:
+            return src_path.stat().st_dev != dst_root.stat().st_dev
+        except OSError:
+            return False
+
     def _get_overflow_path(self) -> Path | None:
         """Return the configured overflow path, or None.
 
@@ -8014,6 +8023,8 @@ class EditorHandler(BaseHTTPRequestHandler):
         overflow = self._get_overflow_path()
         if not overflow:
             return {"ok": False, "error": "No overflow directory configured. Use /api/setup-overflow first."}
+        if not self._is_cross_filesystem_move(Path("/img"), overflow):
+            return {"ok": False, "error": "Overflow is on same filesystem as /img; move would not free space."}
 
         moved = 0
         freed = 0
