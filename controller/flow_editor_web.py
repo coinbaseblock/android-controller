@@ -1186,7 +1186,7 @@ input:focus, select:focus, textarea:focus { outline: none; border-color: var(--b
                 <input type="checkbox" id="diskAutoCleanEnabled" style="width:auto" onchange="toggleDiskAutoClean(this.checked)"> Auto Clean
               </label>
               <label style="display:flex;align-items:center;gap:4px">Threshold
-                <input type="number" id="diskAutoCleanThreshold" min="70" max="98" step="1" value="90" style="width:52px" onchange="updateDiskAutoCleanThreshold(this.value)">%
+                <input type="number" id="diskAutoCleanThreshold" min="70" max="98" step="1" value="80" style="width:52px" onchange="updateDiskAutoCleanThreshold(this.value)">%
               </label>
             </div>
             <div style="margin-top:6px">
@@ -2917,7 +2917,7 @@ setInterval(() => refreshStationLogs(), 10000);
 let _lastDiskPct = 0;
 let _diskRefreshTimer = null;
 let _diskAutoCleanEnabled = localStorage.getItem('diskAutoCleanEnabled') === '1';
-let _diskAutoCleanThreshold = Number(localStorage.getItem('diskAutoCleanThreshold') || '90');
+let _diskAutoCleanThreshold = Number(localStorage.getItem('diskAutoCleanThreshold') || '80');
 let _lastAutoCleanAt = 0;
 let _autoCleanRunning = false;
 let _autoCleanConsecutive = 0;
@@ -7439,7 +7439,7 @@ class EditorHandler(BaseHTTPRequestHandler):
             "errors": errors[:10],
         }
 
-    def _auto_cleanup(self, threshold_pct: float = 90.0) -> dict | None:
+    def _auto_cleanup(self, threshold_pct: float = 80.0) -> dict | None:
         """Auto-cleanup when disk usage exceeds threshold.
 
         Returns cleanup result dict if cleanup was performed, None if not needed.
@@ -7448,15 +7448,17 @@ class EditorHandler(BaseHTTPRequestHandler):
         cleanup based on the most constrained one.
 
         IMPORTANT: Auto-cleanup ONLY triggers when disk usage >= threshold_pct
-        (configured by user, default 90%).  It NEVER deletes extract logs
+        (configured by user, default 80%).  It NEVER deletes extract logs
         (*-extract.jsonl) or playback logs (*-playback.json) because those
         contain station counting data that must be preserved for accurate
-        loop/station tracking.
+        loop/station tracking.  The charger-view export depends on these
+        JSONL files, NOT on capture images.
 
         Strategy (escalating):
-        1. Below 90%: non-destructive only (compress logs, compress images, overflow)
-        2. 90-95%: compress aggressively + smart_clean old captures/sent (keep 6h)
-        3. Above 95%: compress everything + smart_clean (keep 3h minimum)
+        1. Non-destructive: compress logs, compress images (q=45), overflow
+        2. Targeted: delete old JPEG captures (>2h) – data already in JSONL
+        3. 90-95%: smart_clean old captures/sent (keep 4h)
+        4. Above 95%: compress everything + smart_clean (keep 2h minimum)
         Never uses deep_clean.  Never deletes station/extract data.
         """
         try:
@@ -7478,7 +7480,7 @@ class EditorHandler(BaseHTTPRequestHandler):
             # Stage 1: Always try non-destructive methods first (compress + overflow)
             r1 = self._compress_old_logs(keep_hours=4)
             combined["stages"].append({"action": "compress_logs", **r1})
-            r2 = self._compress_images(quality=60)
+            r2 = self._compress_images(quality=45)
             combined["stages"].append({"action": "compress_images", **r2})
             if self._get_overflow_path():
                 r3 = self._move_to_overflow()
@@ -7487,43 +7489,103 @@ class EditorHandler(BaseHTTPRequestHandler):
             combined["freed_mb"] = round(total, 2)
 
             # Re-check if non-destructive was enough
-            new_pct = 0.0
-            for mount in ["/", str(self.work_dir), "/img"]:
-                try:
-                    u = shutil.disk_usage(mount)
-                    pct = u.used / u.total * 100 if u.total else 0
-                    if pct > new_pct:
-                        new_pct = pct
-                except OSError:
-                    pass
+            new_pct = self._max_disk_pct()
             if new_pct <= threshold_pct:
                 return combined
 
-            # Stage 2: Only escalate to smart_clean if disk is at 90%+ (user threshold)
-            # and non-destructive methods weren't sufficient.
-            # Use generous keep_hours to avoid deleting active session data.
-            if used_pct <= 95:
-                r4 = self._smart_clean(keep_hours=6)
-                combined["stages"].append({"action": "smart_clean", **r4})
-                combined["freed_mb"] = round(total + r4.get("freed_mb", 0), 2)
-                combined["deleted"] = r4.get("deleted", 0)
+            # Stage 2: Targeted cleanup – delete old JPEG captures (>2h) only.
+            # Extract data is already saved in JSONL logs, so capture images
+            # are only useful for visual debugging.  This frees significant
+            # space without affecting charger-view export or station data.
+            r_targeted = self._cleanup_old_captures(keep_hours=2)
+            combined["stages"].append({"action": "cleanup_old_captures", **r_targeted})
+            total += r_targeted.get("freed_mb", 0)
+            combined["freed_mb"] = round(total, 2)
+            combined["deleted"] += r_targeted.get("deleted", 0)
+
+            new_pct = self._max_disk_pct()
+            if new_pct <= threshold_pct:
                 return combined
 
-            # Stage 3: Critical (>95%) – compress harder then smart clean
-            # Still keep at least 3 hours of data to avoid corrupting active runs.
+            # Stage 3: Escalate to smart_clean if targeted cleanup wasn't enough.
+            if used_pct <= 95:
+                r4 = self._smart_clean(keep_hours=4)
+                combined["stages"].append({"action": "smart_clean", **r4})
+                combined["freed_mb"] = round(total + r4.get("freed_mb", 0), 2)
+                combined["deleted"] += r4.get("deleted", 0)
+                return combined
+
+            # Stage 4: Critical (>95%) – compress harder then smart clean
+            # Still keep at least 2 hours of data to avoid corrupting active runs.
             # NOTE: Never use deep_clean in auto mode – it would delete ALL captures
             # including active session files and break station counting.
             self._compress_old_logs(keep_hours=1)
-            self._compress_images(quality=45)
+            self._compress_images(quality=35)
             if self._get_overflow_path():
                 self._move_to_overflow()
-            r5 = self._smart_clean(keep_hours=3)
+            r5 = self._smart_clean(keep_hours=2)
             combined["stages"].append({"action": "smart_clean_critical", **r5})
             combined["freed_mb"] = round(total + r5.get("freed_mb", 0), 2)
-            combined["deleted"] = r5.get("deleted", 0)
+            combined["deleted"] += r5.get("deleted", 0)
             return combined
         except Exception:
             return None
+
+    def _max_disk_pct(self) -> float:
+        """Return the highest disk usage percentage across all relevant mounts."""
+        max_pct = 0.0
+        for mount in ["/", str(self.work_dir), "/img"]:
+            try:
+                u = shutil.disk_usage(mount)
+                pct = u.used / u.total * 100 if u.total else 0
+                if pct > max_pct:
+                    max_pct = pct
+            except OSError:
+                pass
+        return max_pct
+
+    def _cleanup_old_captures(self, keep_hours: int = 2) -> dict:
+        """Delete old JPEG/PNG capture images while preserving extract logs.
+
+        This is a targeted cleanup that only removes capture *images* older
+        than keep_hours.  All extract JSONL logs are preserved so the
+        charger-view export continues to work with full historical data.
+
+        This is more efficient than smart_clean because it targets only the
+        largest space consumer (JPEG captures ~125 KB each) without touching
+        logs, recordings, or other files.
+        """
+        import time
+
+        cutoff = time.time() - (keep_hours * 3600)
+        deleted = 0
+        freed = 0
+        errors: list[str] = []
+
+        for dir_path in [Path("/img/captures"), Path("/img/sent")]:
+            if not dir_path.exists():
+                continue
+            for p in dir_path.iterdir():
+                if not p.is_file():
+                    continue
+                # Only target image files (JPEG and PNG captures)
+                if p.suffix.lower() not in (".jpg", ".jpeg", ".png"):
+                    continue
+                try:
+                    st = p.stat()
+                    if st.st_mtime < cutoff:
+                        freed += st.st_size
+                        p.unlink()
+                        deleted += 1
+                except Exception as e:
+                    errors.append(f"capture {p.name}: {e}")
+
+        return {
+            "ok": True,
+            "deleted": deleted,
+            "freed_mb": round(freed / (1024**2), 2),
+            "errors": errors[:10],
+        }
 
     # -------- Storage Expansion: Compress + Overflow --------
 
@@ -7587,12 +7649,14 @@ class EditorHandler(BaseHTTPRequestHandler):
             "errors": errors[:10],
         }
 
-    def _compress_images(self, quality: int = 60) -> dict:
-        """Convert PNG captures/sent images to JPEG to save ~70-85% space.
+    def _compress_images(self, quality: int = 45) -> dict:
+        """Convert PNG captures/sent images to JPEG to save ~80-90% space.
 
         Screenshots from Android screencap are typically 24-bit PNG with no
         transparency, so JPEG conversion is lossless in information that
         matters for automation (extract data was already saved to JSONL).
+        Quality 45 is sufficient for visual debugging; all actual data
+        is preserved in the JSONL extract logs used by charger-view export.
         Falls back gracefully if Pillow is not installed.
         """
         converted = 0
