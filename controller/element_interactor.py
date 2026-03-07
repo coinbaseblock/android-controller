@@ -390,12 +390,21 @@ def force_stop_app(serial: Optional[str], package: str) -> None:
 
 
 def take_screenshot(serial: Optional[str], output_path: Path) -> Path:
-    """Take a screenshot and save to output_path."""
+    """Take a screenshot and save to output_path.
+
+    After pulling the image from the phone, the temporary file on the phone
+    is deleted to prevent phone storage from filling up over long runs.
+    """
     prefix = adb_cmd(serial)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     remote = "/sdcard/automation_screen.png"
     run_adb(prefix + ["shell", "screencap", "-p", remote])
     run_adb(prefix + ["pull", remote, str(output_path)])
+    # Clean up temp file on phone to prevent storage from filling up
+    try:
+        run_adb(prefix + ["shell", "rm", "-f", remote])
+    except Exception:
+        pass  # Non-critical: file gets overwritten next time anyway
     return output_path
 
 

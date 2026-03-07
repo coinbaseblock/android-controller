@@ -112,7 +112,7 @@ class SequenceRunner:
         """Keep PNG captures as-is (no JPEG conversion).
 
         PNG format is preserved per configuration. Space is managed by
-        periodic cleanup (deleting old captures >4h) and moving to HDD/overflow.
+        archiving completed loop captures to HDD and periodic cleanup.
         Returns 0 (no conversion performed).
         """
         return 0
@@ -158,19 +158,81 @@ class SequenceRunner:
                     pass
         return saved
 
-    def _move_to_overflow(self) -> int:
-        """Move old captures/sent to overflow dir if configured. Returns bytes freed."""
-        import shutil as _shutil
+    @staticmethod
+    def _get_overflow_root() -> Optional[Path]:
+        """Return the overflow root directory, or None if not configured/available."""
+        # Check config file first
         config_path = Path("/work/.overflow_config")
-        if not config_path.exists():
+        if config_path.exists():
+            try:
+                import json as _json
+                cfg = _json.loads(config_path.read_text(encoding="utf-8"))
+                p = Path(cfg.get("path", ""))
+                if p.exists():
+                    return p
+            except Exception:
+                pass
+        # Fall back to default mount
+        p = Path("/overflow")
+        if p.exists():
+            return p
+        return None
+
+    def _archive_loop_captures(self, loop_idx: int) -> int:
+        """Archive captures from a completed loop to HDD organized by date/loop.
+
+        Moves all capture images matching the loop index to:
+          /overflow/archive/YYYY-MM-DD/loop-NNNN/
+
+        This preserves ALL captures for every station in the loop so that
+        rounds remain complete and consistent across stations.
+        Returns bytes moved (freed from /img/captures).
+        """
+        overflow = self._get_overflow_root()
+        if overflow is None:
             return 0
-        try:
-            import json as _json
-            cfg = _json.loads(config_path.read_text(encoding="utf-8"))
-            overflow = Path(cfg.get("path", ""))
-            if not overflow.exists():
-                return 0
-        except Exception:
+
+        today = datetime.now().strftime("%Y-%m-%d")
+        archive_dir = overflow / "archive" / today / f"loop-{loop_idx:04d}"
+        archive_dir.mkdir(parents=True, exist_ok=True)
+
+        loop_prefix = f"loop{loop_idx:04d}-"
+        freed = 0
+
+        for src_dir in [Path("/img/captures"), Path("/img/sent")]:
+            if not src_dir.exists():
+                continue
+            for f in list(src_dir.iterdir()):
+                if not f.is_file():
+                    continue
+                if f.suffix.lower() not in (".png", ".jpg", ".jpeg"):
+                    continue
+                # Only archive captures from this specific loop
+                if not f.name.startswith(loop_prefix) and not f.name.startswith(f"extract-loop{loop_idx:04d}-"):
+                    continue
+                try:
+                    sz = f.stat().st_size
+                    shutil.move(str(f), str(archive_dir / f.name))
+                    freed += sz
+                except Exception:
+                    pass
+
+        if freed > 0:
+            self.log(
+                f"Archived loop {loop_idx} captures to {archive_dir} "
+                f"({freed / (1024*1024):.1f} MB)",
+                "OK",
+            )
+        return freed
+
+    def _move_to_overflow(self) -> int:
+        """Move old captures/sent to overflow dir if configured. Returns bytes freed.
+
+        Only moves files from PREVIOUS loops (>30 min old) that were not
+        already archived by _archive_loop_captures.
+        """
+        overflow = self._get_overflow_root()
+        if overflow is None:
             return 0
 
         freed = 0
@@ -187,7 +249,7 @@ class SequenceRunner:
                     if f.stat().st_mtime >= cutoff:
                         continue
                     sz = f.stat().st_size
-                    _shutil.move(str(f), str(dst_dir / f.name))
+                    shutil.move(str(f), str(dst_dir / f.name))
                     freed += sz
                 except Exception:
                     pass
@@ -271,61 +333,146 @@ class SequenceRunner:
                     pass
         return freed
 
-    def _cleanup_captures(self) -> None:
-        """Free disk space between scripts with disk-aware escalation.
+    def _cleanup_old_archives(self, keep_days: int = 7) -> int:
+        """Delete archived captures older than keep_days. Returns bytes freed."""
+        overflow = self._get_overflow_root()
+        if overflow is None:
+            return 0
+        archive_root = overflow / "archive"
+        if not archive_root.exists():
+            return 0
+        freed = 0
+        cutoff = time.time() - (keep_days * 86400)
+        for day_dir in list(archive_root.iterdir()):
+            if not day_dir.is_dir():
+                continue
+            try:
+                if day_dir.stat().st_mtime < cutoff:
+                    sz = sum(f.stat().st_size for f in day_dir.rglob("*") if f.is_file())
+                    shutil.rmtree(str(day_dir), ignore_errors=True)
+                    freed += sz
+            except Exception:
+                pass
+        return freed
 
-        Strategy based on current disk usage:
-        - Below 80%: non-destructive only (compress logs, move to overflow)
-        - 80-90%: delete captures older than 10 minutes
-        - 90-95%: delete captures older than 2 minutes
-        - Above 95%: delete ALL captures (data is safe in JSONL logs)
+    def _cleanup_between_scripts(self) -> None:
+        """Non-destructive cleanup between scripts WITHIN a loop.
+
+        CRITICAL: Never deletes captures from the current loop to ensure
+        all stations have complete, consistent rounds. Only compresses old
+        logs and moves old files (from previous loops) to overflow.
+
+        If disk is critically full (>95%), archives old captures to HDD
+        but still preserves the current loop's data.
         """
         freed = 0
         actions = []
-
         usage = self._disk_usage_pct()
 
-        # Step 1: Always try non-destructive methods
+        # Step 1: Compress old logs (non-destructive)
         log_saved = self._compress_old_logs()
         if log_saved > 0:
             freed += log_saved
             actions.append(f"compressed logs ({log_saved / (1024*1024):.1f} MB)")
 
+        # Step 2: Move old files (from previous loops, >30 min) to overflow
         overflow_freed = self._move_to_overflow()
         if overflow_freed > 0:
             freed += overflow_freed
-            actions.append(f"moved to overflow ({overflow_freed / (1024*1024):.1f} MB)")
+            actions.append(f"moved old to overflow ({overflow_freed / (1024*1024):.1f} MB)")
 
-        # Step 2: Disk-aware escalation - delete captures when needed
+        # Step 3: If still critical, clean old archives and cache/temp only
         if usage >= 95:
-            # Critical: delete ALL captures to prevent disk-full errors
-            cap_freed = self._delete_all_captures()
-            if cap_freed > 0:
-                freed += cap_freed
-                actions.append(f"deleted all captures ({cap_freed / (1024*1024):.1f} MB)")
-        elif usage >= 90:
-            # High: delete captures older than 2 minutes
-            cap_freed = self._delete_old_captures(keep_minutes=2)
-            if cap_freed > 0:
-                freed += cap_freed
-                actions.append(f"deleted old captures >2min ({cap_freed / (1024*1024):.1f} MB)")
-        elif usage >= 80:
-            # Warning: delete captures older than 10 minutes
-            cap_freed = self._delete_old_captures(keep_minutes=10)
-            if cap_freed > 0:
-                freed += cap_freed
-                actions.append(f"deleted old captures >10min ({cap_freed / (1024*1024):.1f} MB)")
+            archive_freed = self._cleanup_old_archives(keep_days=3)
+            if archive_freed > 0:
+                freed += archive_freed
+                actions.append(f"cleaned old archives ({archive_freed / (1024*1024):.1f} MB)")
+            # Clean temp/cache only (not captures)
+            for tmp_dir in [Path("/img/cache"), Path("/img/temp")]:
+                if not tmp_dir.exists():
+                    continue
+                for f in list(tmp_dir.iterdir()):
+                    if not f.is_file():
+                        continue
+                    try:
+                        freed += f.stat().st_size
+                        f.unlink()
+                    except Exception:
+                        pass
 
         if freed > 0:
             new_usage = self._disk_usage_pct()
             self.log(
-                f"Cleanup: {freed / (1024*1024):.1f} MB freed ({', '.join(actions)}) "
-                f"[disk: {usage:.0f}% -> {new_usage:.0f}%]",
+                f"Cleanup (between scripts): {freed / (1024*1024):.1f} MB freed "
+                f"({', '.join(actions)}) [disk: {usage:.0f}% -> {new_usage:.0f}%]",
                 "OK",
             )
         elif usage >= 85:
-            # Warn even if nothing was freed
-            self.log(f"Disk usage high ({usage:.0f}%) but no files to clean", "WARN")
+            self.log(
+                f"Disk usage high ({usage:.0f}%) - will archive after loop completes",
+                "WARN",
+            )
+
+    def _cleanup_after_loop(self, loop_idx: int) -> None:
+        """Archive and clean up after a COMPLETE loop.
+
+        This runs after ALL stations in a loop have finished, so it is safe
+        to move/delete captures. The flow is:
+          1. Archive this loop's captures to HDD (/overflow/archive/YYYY-MM-DD/loop-NNNN/)
+          2. Compress old logs
+          3. Move any remaining old files to overflow
+          4. If disk still high, clean old archives (>7 days)
+        """
+        freed = 0
+        actions = []
+        usage = self._disk_usage_pct()
+
+        # Step 1: Archive this loop's captures to organized HDD directory
+        archive_freed = self._archive_loop_captures(loop_idx)
+        if archive_freed > 0:
+            freed += archive_freed
+            actions.append(f"archived loop {loop_idx} ({archive_freed / (1024*1024):.1f} MB)")
+
+        # Step 2: Compress old logs
+        log_saved = self._compress_old_logs()
+        if log_saved > 0:
+            freed += log_saved
+            actions.append(f"compressed logs ({log_saved / (1024*1024):.1f} MB)")
+
+        # Step 3: Move any remaining old files to overflow
+        overflow_freed = self._move_to_overflow()
+        if overflow_freed > 0:
+            freed += overflow_freed
+            actions.append(f"moved old to overflow ({overflow_freed / (1024*1024):.1f} MB)")
+
+        # Step 4: If disk still high, also clean old archives
+        new_usage = self._disk_usage_pct()
+        if new_usage >= 90:
+            old_freed = self._cleanup_old_archives(keep_days=3)
+            if old_freed > 0:
+                freed += old_freed
+                actions.append(f"cleaned old archives ({old_freed / (1024*1024):.1f} MB)")
+        elif new_usage >= 80:
+            old_freed = self._cleanup_old_archives(keep_days=7)
+            if old_freed > 0:
+                freed += old_freed
+                actions.append(f"cleaned old archives ({old_freed / (1024*1024):.1f} MB)")
+
+        if freed > 0:
+            final_usage = self._disk_usage_pct()
+            self.log(
+                f"Cleanup (after loop {loop_idx}): {freed / (1024*1024):.1f} MB freed "
+                f"({', '.join(actions)}) [disk: {usage:.0f}% -> {final_usage:.0f}%]",
+                "OK",
+            )
+
+    def _cleanup_captures(self) -> None:
+        """Legacy entry point — delegates to _cleanup_between_scripts().
+
+        Kept for backward compatibility with code that calls _cleanup_captures()
+        directly (e.g. flow_editor_web.py).
+        """
+        self._cleanup_between_scripts()
 
     def run(self) -> int:
         """Run the sequence. Returns 0 on success."""
@@ -406,16 +553,17 @@ class SequenceRunner:
                             self._running = False
                             break
 
-                    # Clean up capture images between scripts to prevent disk full on long runs
-                    self._cleanup_captures()
+                    # Non-destructive cleanup between scripts (NEVER deletes current loop captures)
+                    self._cleanup_between_scripts()
 
                     # Delay between scripts
                     if self._running and i < len(enabled_scripts) - 1 and self.script_delay > 0:
                         self.log(f"Waiting {self.script_delay}s before next script...", "INFO")
                         time.sleep(self.script_delay)
 
-                # Also clean up after the full loop completes
-                self._cleanup_captures()
+                # Archive captures and clean up after the COMPLETE loop
+                # All stations have finished, so it's safe to move/delete captures
+                self._cleanup_after_loop(loop_idx)
 
                 if not self.loop:
                     break
