@@ -7376,21 +7376,41 @@ class EditorHandler(BaseHTTPRequestHandler):
                 or name.endswith("-playback.json") or name.endswith("-playback.html"))
 
     def _deep_clean(self) -> dict:
-        """Aggressively clean disk space: logs, captures, sent images, temp files, __pycache__."""
+        """Aggressively clean disk space: logs, captures, sent images, temp files, __pycache__.
+
+        Station data files (extract.jsonl, playback logs) are moved to
+        overflow/HDD when available instead of being deleted or skipped.
+        """
         deleted = 0
         freed = 0
         errors = []
         details = {}
 
-        # 1. Clear transient log files (preserve extract & station playback logs)
+        # Check for overflow/HDD to move protected files there
+        overflow = self._get_overflow_path()
+        overflow_logs = None
+        if overflow:
+            overflow_logs = overflow / "logs"
+            overflow_logs.mkdir(exist_ok=True)
+
+        # 1. Clear transient log files; move station data to overflow if available
         log_del = 0
+        log_moved = 0
         for log_dir in [Path(self.work_dir) / "logs", Path("/img/logs")]:
             if not log_dir.exists():
                 continue
             for p in log_dir.iterdir():
                 if p.is_file():
-                    # Skip station/extract data – cannot be regenerated
                     if self._is_station_data_file(p):
+                        # Move to overflow instead of skipping
+                        if overflow_logs:
+                            try:
+                                sz = p.stat().st_size
+                                shutil.move(str(p), str(overflow_logs / p.name))
+                                freed += sz
+                                log_moved += 1
+                            except Exception as e:
+                                errors.append(f"move {p.name}: {e}")
                         continue
                     try:
                         freed += p.stat().st_size
@@ -7400,36 +7420,59 @@ class EditorHandler(BaseHTTPRequestHandler):
                     except Exception as e:
                         errors.append(f"log {p.name}: {e}")
         details["logs"] = log_del
+        details["logs_moved"] = log_moved
 
-        # 2. Clear /img/captures
+        # 2. Clear /img/captures — move to overflow if available, else delete
         cap_dir = Path("/img/captures")
         cap_del = 0
+        cap_moved = 0
+        overflow_caps = None
+        if overflow:
+            overflow_caps = overflow / "captures"
+            overflow_caps.mkdir(exist_ok=True)
         if cap_dir.exists():
             for p in cap_dir.rglob("*"):
                 if p.is_file():
                     try:
-                        freed += p.stat().st_size
-                        p.unlink()
+                        sz = p.stat().st_size
+                        if overflow_caps:
+                            shutil.move(str(p), str(overflow_caps / p.name))
+                            cap_moved += 1
+                        else:
+                            p.unlink()
+                            cap_del += 1
+                        freed += sz
                         deleted += 1
-                        cap_del += 1
                     except Exception as e:
                         errors.append(f"capture {p.name}: {e}")
         details["captures"] = cap_del
+        details["captures_moved"] = cap_moved
 
-        # 3. Clear /img/sent
+        # 3. Clear /img/sent — move to overflow if available, else delete
         sent_dir = Path("/img/sent")
         sent_del = 0
+        sent_moved = 0
+        overflow_sent = None
+        if overflow:
+            overflow_sent = overflow / "sent"
+            overflow_sent.mkdir(exist_ok=True)
         if sent_dir.exists():
             for p in sent_dir.rglob("*"):
                 if p.is_file():
                     try:
-                        freed += p.stat().st_size
-                        p.unlink()
+                        sz = p.stat().st_size
+                        if overflow_sent:
+                            shutil.move(str(p), str(overflow_sent / p.name))
+                            sent_moved += 1
+                        else:
+                            p.unlink()
+                            sent_del += 1
+                        freed += sz
                         deleted += 1
-                        sent_del += 1
                     except Exception as e:
                         errors.append(f"sent {p.name}: {e}")
         details["sent"] = sent_del
+        details["sent_moved"] = sent_moved
 
         # 4. Clear __pycache__ directories
         pc_del = 0
@@ -7525,15 +7568,44 @@ class EditorHandler(BaseHTTPRequestHandler):
         details["captures"] = _clean_old_files(Path("/img/captures"), "capture")
         details["sent"] = _clean_old_files(Path("/img/sent"), "sent")
 
-        # ALWAYS protect station/extract data files – they contain loop counters
-        # and station tracking.  Deleting them breaks loop counting accuracy.
-        _skip_station_data = self._is_station_data_file
+        # Station/extract data files: move to overflow if available, else skip
+        overflow = self._get_overflow_path()
+        overflow_logs = None
+        if overflow:
+            overflow_logs = overflow / "logs"
+            overflow_logs.mkdir(exist_ok=True)
 
         log_total = 0
+        log_moved = 0
         for log_dir in [Path(self.work_dir) / "logs", Path("/img/logs")]:
-            log_total += _clean_old_files(log_dir, "log",
-                                          recursive=False, skip_fn=_skip_station_data)
+            if not log_dir.exists():
+                continue
+            for p in log_dir.iterdir():
+                if not p.is_file():
+                    continue
+                if self._is_station_data_file(p):
+                    # Move old station data to overflow instead of skipping
+                    if overflow_logs:
+                        try:
+                            st = p.stat()
+                            if st.st_mtime < cutoff:
+                                freed += st.st_size
+                                shutil.move(str(p), str(overflow_logs / p.name))
+                                log_moved += 1
+                        except Exception as e:
+                            errors.append(f"move {p.name}: {e}")
+                    continue
+                try:
+                    st = p.stat()
+                    if st.st_mtime < cutoff:
+                        freed += st.st_size
+                        p.unlink()
+                        deleted += 1
+                        log_total += 1
+                except Exception as e:
+                    errors.append(f"log {p.name}: {e}")
         details["logs"] = log_total
+        details["logs_moved"] = log_moved
 
         # Always clean pycache and temp files fully
         pc_del = 0
@@ -7625,7 +7697,8 @@ class EditorHandler(BaseHTTPRequestHandler):
             r2 = self._compress_images(quality=45)
             combined["stages"].append({"action": "compress_images", **r2})
             if self._get_overflow_path():
-                r3 = self._move_to_overflow()
+                # Move ALL captures to overflow when disk is high
+                r3 = self._move_to_overflow(move_all=(used_pct >= 90))
                 combined["stages"].append({"action": "overflow_move", **r3})
             total = sum(s.get("saved_mb", 0) + s.get("freed_mb", 0) for s in combined["stages"])
             combined["freed_mb"] = round(total, 2)
@@ -7664,7 +7737,7 @@ class EditorHandler(BaseHTTPRequestHandler):
             self._compress_old_logs(keep_hours=1)
             self._compress_images(quality=35)
             if self._get_overflow_path():
-                self._move_to_overflow()
+                self._move_to_overflow(move_all=True)
             r5 = self._smart_clean(keep_hours=2)
             combined["stages"].append({"action": "smart_clean_critical", **r5})
             combined["freed_mb"] = round(total + r5.get("freed_mb", 0), 2)
@@ -7909,10 +7982,14 @@ class EditorHandler(BaseHTTPRequestHandler):
             return default
         return None
 
-    def _move_to_overflow(self) -> dict:
-        """Move old captures and sent images to overflow directory to free primary disk.
+    def _move_to_overflow(self, move_all: bool = False) -> dict:
+        """Move captures and sent images to overflow directory to free primary disk.
 
         Unlike deletion, this preserves the files on secondary storage.
+
+        Args:
+            move_all: If True, move ALL image files regardless of age.
+                      If False, only move files older than 1 hour.
         """
         import time as _time
 
@@ -7923,7 +8000,7 @@ class EditorHandler(BaseHTTPRequestHandler):
         moved = 0
         freed = 0
         errors: list[str] = []
-        cutoff = _time.time() - 3600  # move files older than 1 hour
+        cutoff = _time.time() - 3600  # 1 hour (ignored when move_all=True)
 
         for sub, src_dir in [("captures", Path("/img/captures")), ("sent", Path("/img/sent"))]:
             dst_dir = overflow / sub
@@ -7934,11 +8011,12 @@ class EditorHandler(BaseHTTPRequestHandler):
                 if not p.is_file():
                     continue
                 try:
-                    if p.stat().st_mtime >= cutoff:
+                    if not move_all and p.stat().st_mtime >= cutoff:
                         continue
+                    sz = p.stat().st_size
                     dst = dst_dir / p.name
                     shutil.move(str(p), str(dst))
-                    freed += dst.stat().st_size
+                    freed += sz
                     moved += 1
                 except Exception as e:
                     errors.append(f"{p.name}: {e}")
