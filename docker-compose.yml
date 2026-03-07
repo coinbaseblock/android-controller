@@ -20,11 +20,10 @@ services:
       # ใช้ absolute path บน Windows ต้องใส่ในเครื่องหมายคำพูด และใช้ D:/ (ตัวใหญ่ และ forward slash)
       - "D:/android-controller/adbkeys:/root/.android"
       - "D:/android-controller/data:/work"
+      # captures/sent จะถูกเก็บที่ /img ซึ่ง mount ไว้บน HDD (ไม่ใช่ใน Docker container)
       - "D:/android-controller/img:/img"
-      # Overflow storage: เมื่อ /img เต็ม ไฟล์จะถูกย้ายมาที่นี่อัตโนมัติ
-      # ใช้ดิสก์ลูกอื่น หรือ NAS path เพื่อขยายพื้นที่ได้
-      # ตัวอย่าง: - "E:/android-overflow:/overflow"
-      # แล้วตั้งค่า overflow path = /overflow ผ่าน Web UI
+      # Overflow storage: ไฟล์เก่าจะถูกย้ายมาที่นี่บน HDD อัตโนมัติ
+      - "D:/android-controller/overflow:/overflow"
     # tmpfs: ย้าย temp/cache ไปใช้ RAM เพื่อไม่กินพื้นที่ดิสก์ overlay
     tmpfs:
       - /tmp:size=2G
@@ -65,9 +64,10 @@ services:
     volumes:
       - "D:/android-controller/adbkeys:/root/.android"
       - "D:/android-controller/data:/work"
+      # captures/sent จะถูกเก็บที่ /img ซึ่ง mount ไว้บน HDD (ไม่ใช่ใน Docker container)
       - "D:/android-controller/img:/img"
-      # Overflow storage: เหมือน adb-server ข้างบน
-      # ตัวอย่าง: - "E:/android-overflow:/overflow"
+      # Overflow storage: ไฟล์เก่าจะถูกย้ายมาที่นี่บน HDD อัตโนมัติ
+      - "D:/android-controller/overflow:/overflow"
     tmpfs:
       - /tmp:size=2G
       - /var/tmp:size=1G

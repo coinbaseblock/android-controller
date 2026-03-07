@@ -108,45 +108,13 @@ class SequenceRunner:
         }
 
     def _compress_captures(self) -> int:
-        """Convert PNG captures/sent to JPEG to save space instead of deleting.
+        """Keep PNG captures as-is (no JPEG conversion).
 
-        Returns bytes saved.  Falls back to deletion if Pillow is unavailable.
+        PNG format is preserved per configuration. Space is managed by
+        periodic cleanup (deleting old captures >4h) and moving to HDD/overflow.
+        Returns 0 (no conversion performed).
         """
-        saved = 0
-        try:
-            from PIL import Image as _Image  # type: ignore
-            has_pil = True
-        except ImportError:
-            has_pil = False
-
-        for dir_path in [Path("/img/captures"), Path("/img/sent")]:
-            if not dir_path.exists():
-                continue
-            for f in list(dir_path.iterdir()):
-                if not f.is_file():
-                    continue
-                if has_pil and f.suffix.lower() == ".png":
-                    try:
-                        orig = f.stat().st_size
-                        if orig < 4096:
-                            continue
-                        img = _Image.open(f)
-                        if img.mode in ("RGBA", "LA", "P"):
-                            img = img.convert("RGB")
-                        jpg = f.with_suffix(".jpg")
-                        img.save(jpg, "JPEG", quality=55, optimize=True)
-                        saved += orig - jpg.stat().st_size
-                        f.unlink()
-                    except Exception:
-                        pass
-                elif not has_pil and f.suffix.lower() == ".png":
-                    # Fallback: just delete PNGs if no Pillow
-                    try:
-                        saved += f.stat().st_size
-                        f.unlink()
-                    except OSError:
-                        pass
-        return saved
+        return 0
 
     @staticmethod
     def _is_station_data_file(name: str) -> bool:
