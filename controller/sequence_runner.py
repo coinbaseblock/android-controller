@@ -225,18 +225,19 @@ class SequenceRunner:
             )
         return freed
 
-    def _move_to_overflow(self) -> int:
-        """Move old captures/sent to overflow dir if configured. Returns bytes freed.
+    def _move_to_overflow(self, move_all: bool = False) -> int:
+        """Move captures/sent to overflow dir if configured. Returns bytes freed.
 
-        Only moves files from PREVIOUS loops (>30 min old) that were not
-        already archived by _archive_loop_captures.
+        Args:
+            move_all: If True, move ALL image files regardless of age.
+                      If False, only move files older than 30 min.
         """
         overflow = self._get_overflow_root()
         if overflow is None:
             return 0
 
         freed = 0
-        cutoff = time.time() - 1800  # move files older than 30 min
+        cutoff = time.time() - 1800  # 30 min (ignored when move_all=True)
         for sub, src in [("captures", Path("/img/captures")), ("sent", Path("/img/sent"))]:
             dst_dir = overflow / sub
             dst_dir.mkdir(exist_ok=True)
@@ -245,8 +246,10 @@ class SequenceRunner:
             for f in list(src.iterdir()):
                 if not f.is_file():
                     continue
+                if f.suffix.lower() not in (".png", ".jpg", ".jpeg"):
+                    continue
                 try:
-                    if f.stat().st_mtime >= cutoff:
+                    if not move_all and f.stat().st_mtime >= cutoff:
                         continue
                     sz = f.stat().st_size
                     shutil.move(str(f), str(dst_dir / f.name))
@@ -358,16 +361,14 @@ class SequenceRunner:
     def _cleanup_between_scripts(self) -> None:
         """Cleanup between scripts WITHIN a loop.
 
-        Escalation strategy based on disk usage:
-          <80%  — no action
-          80-85% — compress logs, move old to overflow (non-destructive)
-          85-90% — also delete captures older than 2 minutes
-          90-95% — also delete ALL old captures (keep_minutes=0) and archive to overflow
-          >=95%  — emergency: delete ALL capture images (data is in JSONL)
+        Primary strategy: MOVE captures to overflow/HDD (preserves all data).
+        Deletion is only a last resort when overflow is not configured.
 
-        Extract data is always preserved in JSONL log files, so capture
-        images are only needed for visual debugging and can be safely
-        removed when disk space is critical.
+        Escalation based on disk usage:
+          <80%  — no action
+          80-90% — compress logs, move old captures (>30 min) to overflow
+          90%+  — move ALL captures to overflow immediately
+          95%+  — if overflow unavailable, delete as last resort
         """
         freed = 0
         actions = []
@@ -376,19 +377,15 @@ class SequenceRunner:
         if usage < 80:
             return
 
+        has_overflow = self._get_overflow_root() is not None
+
         # Step 1: Compress old logs (non-destructive)
         log_saved = self._compress_old_logs()
         if log_saved > 0:
             freed += log_saved
             actions.append(f"compressed logs ({log_saved / (1024*1024):.1f} MB)")
 
-        # Step 2: Move old files (from previous loops, >30 min) to overflow
-        overflow_freed = self._move_to_overflow()
-        if overflow_freed > 0:
-            freed += overflow_freed
-            actions.append(f"moved old to overflow ({overflow_freed / (1024*1024):.1f} MB)")
-
-        # Step 3: Clean temp/cache
+        # Step 2: Clean temp/cache
         for tmp_dir in [Path("/img/cache"), Path("/img/temp")]:
             if not tmp_dir.exists():
                 continue
@@ -401,39 +398,38 @@ class SequenceRunner:
                 except Exception:
                     pass
 
-        # Step 4: At 85%+, delete captures older than 2 minutes
-        # (data already saved in JSONL logs)
-        if usage >= 85:
+        # Step 3: Move captures to overflow/HDD
+        if has_overflow:
+            if usage >= 90:
+                # Move ALL captures immediately — HDD has plenty of space
+                overflow_freed = self._move_to_overflow(move_all=True)
+            else:
+                # Move only old files (>30 min)
+                overflow_freed = self._move_to_overflow(move_all=False)
+            if overflow_freed > 0:
+                freed += overflow_freed
+                actions.append(f"moved to overflow ({overflow_freed / (1024*1024):.1f} MB)")
+
+        # Step 4: If still high after move, archive current loop captures too
+        if has_overflow and self._disk_usage_pct() >= 85 and self.current_loop > 0:
+            arc_freed = self._archive_loop_captures(self.current_loop)
+            if arc_freed > 0:
+                freed += arc_freed
+                actions.append(f"archived loop {self.current_loop} ({arc_freed / (1024*1024):.1f} MB)")
+
+        # Step 5: Only delete if overflow is NOT available (last resort)
+        if not has_overflow and self._disk_usage_pct() >= 90:
             prev_freed = self._delete_old_captures(keep_minutes=2)
             if prev_freed > 0:
                 freed += prev_freed
                 actions.append(f"deleted old captures ({prev_freed / (1024*1024):.1f} MB)")
 
-            archive_freed = self._cleanup_old_archives(keep_days=3)
-            if archive_freed > 0:
-                freed += archive_freed
-                actions.append(f"cleaned old archives ({archive_freed / (1024*1024):.1f} MB)")
-
-        # Step 5: At 90%+, delete ALL old captures and archive current loop to overflow
-        if self._disk_usage_pct() >= 90:
-            all_old_freed = self._delete_old_captures(keep_minutes=0)
-            if all_old_freed > 0:
-                freed += all_old_freed
-                actions.append(f"deleted all captures ({all_old_freed / (1024*1024):.1f} MB)")
-
-            if self.current_loop > 0:
-                arc_freed = self._archive_loop_captures(self.current_loop)
-                if arc_freed > 0:
-                    freed += arc_freed
-                    actions.append(f"archived current loop ({arc_freed / (1024*1024):.1f} MB)")
-
-        # Step 6: At 95%+, emergency — delete ALL capture images
-        # Extract data is already saved in JSONL, images are expendable
-        if self._disk_usage_pct() >= 95:
+        # Step 6: Emergency — only if still critical and no overflow
+        if not has_overflow and self._disk_usage_pct() >= 95:
             em_freed = self._delete_all_captures()
             if em_freed > 0:
                 freed += em_freed
-                actions.append(f"emergency delete all captures ({em_freed / (1024*1024):.1f} MB)")
+                actions.append(f"emergency delete all ({em_freed / (1024*1024):.1f} MB)")
 
         if freed > 0:
             new_usage = self._disk_usage_pct()

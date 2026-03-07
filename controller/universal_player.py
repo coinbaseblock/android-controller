@@ -719,15 +719,34 @@ class UniversalPlayer:
 
     # ---------- Helpers ----------
 
-    def _free_disk_space(self, captures_dir: Path) -> int:
-        """Emergency disk space cleanup when ENOSPC occurs during extract.
+    @staticmethod
+    def _get_overflow_root() -> Optional[Path]:
+        """Return the overflow root directory, or None if not configured."""
+        config_path = Path("/work/.overflow_config")
+        if config_path.exists():
+            try:
+                cfg = json.loads(config_path.read_text(encoding="utf-8"))
+                p = Path(cfg.get("path", ""))
+                if p.exists():
+                    return p
+            except Exception:
+                pass
+        p = Path("/overflow")
+        if p.exists():
+            return p
+        return None
 
-        Deletes old capture images (PNG/JPEG) from the captures directory,
-        oldest first. Extract data is already saved in JSONL logs, so
-        capture images are expendable.
-        Returns bytes freed.
+    def _free_disk_space(self, captures_dir: Path) -> int:
+        """Emergency disk space recovery when ENOSPC occurs during extract.
+
+        Primary: move captures to overflow/HDD (preserves all data).
+        Fallback: delete oldest captures only if overflow unavailable.
+        Returns bytes freed from local disk.
         """
         freed = 0
+        overflow = self._get_overflow_root()
+
+        # Collect all capture images
         candidates = []
         for d in [captures_dir, Path("/img/sent"), Path("/img/cache"), Path("/img/temp")]:
             if not d.exists():
@@ -738,18 +757,33 @@ class UniversalPlayer:
                         candidates.append((f.stat().st_mtime, f.stat().st_size, f))
                     except OSError:
                         pass
-        # Sort oldest first
-        candidates.sort(key=lambda x: x[0])
-        # Delete oldest half of captures to make room
-        delete_count = max(len(candidates) // 2, 1)
-        for _, sz, f in candidates[:delete_count]:
-            try:
-                f.unlink()
-                freed += sz
-            except OSError:
-                pass
-        if freed > 0:
-            self.log(f"  Freed {freed / (1024*1024):.1f} MB (deleted {delete_count} old captures)", "WARN")
+        candidates.sort(key=lambda x: x[0])  # oldest first
+
+        if overflow is not None:
+            # Move ALL captures to overflow/HDD
+            dst_dir = overflow / "captures"
+            dst_dir.mkdir(exist_ok=True)
+            moved = 0
+            for _, sz, f in candidates:
+                try:
+                    shutil.move(str(f), str(dst_dir / f.name))
+                    freed += sz
+                    moved += 1
+                except Exception:
+                    pass
+            if freed > 0:
+                self.log(f"  Moved {moved} captures to overflow ({freed / (1024*1024):.1f} MB)", "WARN")
+        else:
+            # No overflow — delete oldest half as last resort
+            delete_count = max(len(candidates) // 2, 1)
+            for _, sz, f in candidates[:delete_count]:
+                try:
+                    f.unlink()
+                    freed += sz
+                except OSError:
+                    pass
+            if freed > 0:
+                self.log(f"  Freed {freed / (1024*1024):.1f} MB (deleted {delete_count} old captures)", "WARN")
         return freed
 
     def _describe_frame(self, frame: Frame) -> str:
