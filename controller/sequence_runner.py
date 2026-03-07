@@ -302,6 +302,34 @@ class SequenceRunner:
                     pass
         return freed
 
+    def _delete_regenerable_files(self) -> int:
+        """Delete files that can be regenerated (HTML log viewers, old .gz logs).
+
+        Returns bytes freed. Called during critical disk situations.
+        """
+        freed = 0
+        for log_dir in [Path("/work/logs"), Path("/img/logs")]:
+            if not log_dir.exists():
+                continue
+            for f in list(log_dir.iterdir()):
+                if not f.is_file():
+                    continue
+                # HTML log viewers can be regenerated from JSON data
+                if f.suffix == ".html":
+                    try:
+                        freed += f.stat().st_size
+                        f.unlink()
+                    except Exception:
+                        pass
+                # Old compressed logs are already archived data
+                elif f.suffix == ".gz":
+                    try:
+                        freed += f.stat().st_size
+                        f.unlink()
+                    except Exception:
+                        pass
+        return freed
+
     def _delete_all_captures(self) -> int:
         """Delete ALL capture images to free space in critical situations. Returns bytes freed.
 
@@ -417,15 +445,23 @@ class SequenceRunner:
                 freed += arc_freed
                 actions.append(f"archived loop {self.current_loop} ({arc_freed / (1024*1024):.1f} MB)")
 
-        # Step 5: Only delete if overflow is NOT available (last resort)
-        if not has_overflow and self._disk_usage_pct() >= 90:
+        # Step 5: Delete old captures if disk still high (even with overflow)
+        # Overflow may be on same filesystem or too small — must not rely on it alone
+        if self._disk_usage_pct() >= 90:
             prev_freed = self._delete_old_captures(keep_minutes=2)
             if prev_freed > 0:
                 freed += prev_freed
                 actions.append(f"deleted old captures ({prev_freed / (1024*1024):.1f} MB)")
 
-        # Step 6: Emergency — only if still critical and no overflow
-        if not has_overflow and self._disk_usage_pct() >= 95:
+        # Step 6: Delete regenerable files (HTML viewers, old .gz) if still critical
+        if self._disk_usage_pct() >= 95:
+            regen_freed = self._delete_regenerable_files()
+            if regen_freed > 0:
+                freed += regen_freed
+                actions.append(f"deleted regenerable files ({regen_freed / (1024*1024):.1f} MB)")
+
+        # Step 7: Emergency — delete ALL captures if still critical
+        if self._disk_usage_pct() >= 95:
             em_freed = self._delete_all_captures()
             if em_freed > 0:
                 freed += em_freed
@@ -545,6 +581,23 @@ class SequenceRunner:
                     if pre_usage >= 80:
                         self.log(f"Disk at {pre_usage:.0f}% before script — running cleanup...", "WARN")
                         self._cleanup_between_scripts()
+
+                    # Post-cleanup check: skip script if disk is still critically full
+                    post_usage = self._disk_usage_pct()
+                    if post_usage >= 98:
+                        self.log(
+                            f"Disk still at {post_usage:.0f}% after cleanup — skipping {script_path.name} to avoid Errno 28. "
+                            f"Use Deep Clean or expand storage.",
+                            "ERROR",
+                        )
+                        self.results.append({
+                            "loop": loop_idx, "script": script_path.name,
+                            "status": "error", "error": f"Disk full ({post_usage:.0f}%)",
+                        })
+                        if self.on_script_error == "stop":
+                            self._running = False
+                            break
+                        continue
 
                     if not script_path.exists():
                         self.log(f"File not found: {script_path}", "ERROR")
