@@ -7078,11 +7078,18 @@ class EditorHandler(BaseHTTPRequestHandler):
 
             unique_parts = list(seen_totals.values())
 
-            # Pick the most constrained partition (least free space) for
-            # the headline gauge – this is the one that will hit "disk full"
-            # first.
-            unique_parts.sort(key=lambda x: x[1].free)
-            _primary_mount, primary = unique_parts[0]
+            # Prefer data directories (/work, /img) over root (/) for the
+            # headline gauge.  The container root overlay is often tiny
+            # while actual data lives on mounted volumes with much more
+            # space.  Only fall back to root if no data mounts are found.
+            data_parts = [(m, u) for m, u in unique_parts if m != "/"]
+            if data_parts:
+                # Among data partitions, pick the most constrained
+                data_parts.sort(key=lambda x: x[1].free)
+                _primary_mount, primary = data_parts[0]
+            else:
+                unique_parts.sort(key=lambda x: x[1].free)
+                _primary_mount, primary = unique_parts[0]
 
             total = primary.total
             used = primary.used
@@ -7462,16 +7469,8 @@ class EditorHandler(BaseHTTPRequestHandler):
         Never uses deep_clean.  Never deletes station/extract data.
         """
         try:
-            # Check all relevant mount points, use the most constrained
-            used_pct = 0.0
-            for mount in ["/", str(self.work_dir), "/img"]:
-                try:
-                    u = shutil.disk_usage(mount)
-                    pct = u.used / u.total * 100 if u.total else 0
-                    if pct > used_pct:
-                        used_pct = pct
-                except OSError:
-                    pass
+            # Check data mount points (prefer /work, /img over root /)
+            used_pct = self._max_disk_pct()
             if used_pct <= threshold_pct:
                 return None
 
@@ -7532,17 +7531,28 @@ class EditorHandler(BaseHTTPRequestHandler):
             return None
 
     def _max_disk_pct(self) -> float:
-        """Return the highest disk usage percentage across all relevant mounts."""
-        max_pct = 0.0
+        """Return the highest disk usage percentage across data mounts.
+
+        Prefers data directories (/work, /img) over root (/) so that the
+        small container overlay does not trigger unnecessary auto-cleanup
+        when the actual data volumes have plenty of space.
+        """
+        data_pct = 0.0
+        has_data_mount = False
+        root_pct = 0.0
         for mount in ["/", str(self.work_dir), "/img"]:
             try:
                 u = shutil.disk_usage(mount)
                 pct = u.used / u.total * 100 if u.total else 0
-                if pct > max_pct:
-                    max_pct = pct
+                if mount == "/":
+                    root_pct = pct
+                else:
+                    has_data_mount = True
+                    if pct > data_pct:
+                        data_pct = pct
             except OSError:
                 pass
-        return max_pct
+        return data_pct if has_data_mount else root_pct
 
     def _cleanup_old_captures(self, keep_hours: int = 4) -> dict:
         """Delete old PNG/JPEG capture images while preserving extract logs.
