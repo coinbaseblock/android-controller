@@ -42,6 +42,7 @@ import zipfile
 from datetime import datetime
 import xml.etree.ElementTree as _ET
 from http.server import HTTPServer, BaseHTTPRequestHandler
+from socketserver import ThreadingMixIn
 from pathlib import Path
 from typing import Any, Optional
 from urllib.parse import urlparse, parse_qs
@@ -4006,13 +4007,17 @@ async function captureScreen() {
       noScreen.style.display = 'none';
       img.style.display = 'block';
       URL.revokeObjectURL(url);
+      status.textContent = 'Screen updated | ' + new Date().toLocaleTimeString();
       // Refresh debug overlays if enabled
       if (debugFramesEnabled) {
         fetchDebugElements();
       }
     };
+    img.onerror = function() {
+      URL.revokeObjectURL(url);
+      status.textContent = 'Error: invalid image data';
+    };
     img.src = url;
-    status.textContent = 'Screen updated | ' + new Date().toLocaleTimeString();
   } catch (e) {
     status.textContent = 'Error: ' + e.message;
   } finally {
@@ -4050,6 +4055,10 @@ async function captureScreenWithElements() {
         renderDebugOverlays(elData.elements || []);
       }
       URL.revokeObjectURL(url);
+    };
+    img.onerror = function() {
+      URL.revokeObjectURL(url);
+      status.textContent = 'Error: invalid image data';
     };
     img.src = url;
 
@@ -5939,6 +5948,11 @@ loadData();
 # HTTP Server
 # ============================================================
 
+class ThreadingHTTPServer(ThreadingMixIn, HTTPServer):
+    """Handle requests in separate threads so screencap doesn't block the UI."""
+    daemon_threads = True
+
+
 class EditorHandler(BaseHTTPRequestHandler):
     work_dir: str = "/work"
     # Short TTL cache for station logs to ensure consistent data across
@@ -6285,7 +6299,7 @@ class EditorHandler(BaseHTTPRequestHandler):
                 timeout=10,
             )
             if result.returncode != 0 or not result.stdout:
-                self._json({"error": "Screenshot capture failed"})
+                self._error(503, "Screenshot capture failed")
                 return
             data = result.stdout
             self.send_response(200)
@@ -6296,11 +6310,11 @@ class EditorHandler(BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(data)
         except subprocess.TimeoutExpired:
-            self._json({"error": "Screenshot timed out"})
+            self._error(504, "Screenshot timed out")
         except FileNotFoundError:
-            self._json({"error": "ADB not found"})
+            self._error(503, "ADB not found")
         except Exception as e:
-            self._json({"error": str(e)})
+            self._error(503, str(e))
 
     def _capture_elements(self, params: dict) -> dict:
         """Capture UI hierarchy via ADB and return parsed elements."""
@@ -8402,7 +8416,7 @@ def main() -> int:
     args = parser.parse_args()
 
     EditorHandler.work_dir = args.dir
-    server = HTTPServer(("0.0.0.0", args.port), EditorHandler)
+    server = ThreadingHTTPServer(("0.0.0.0", args.port), EditorHandler)
 
     print(f"Flow Editor running on http://0.0.0.0:{args.port}")
     print(f"Working directory: {args.dir}")
