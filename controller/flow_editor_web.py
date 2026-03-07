@@ -3014,21 +3014,35 @@ async function refreshDiskSpace() {
     const warn = document.getElementById('diskSpaceWarning');
     const catActions = document.getElementById('diskCategoryActions');
     if (!data.ok) { el.textContent = 'Error: ' + (data.error || 'unknown'); return; }
+    // data.used_pct = user data percentage; data.fs_used_pct = real filesystem pct
     const pct = data.used_pct;
-    _lastDiskPct = pct;
+    const fsPct = data.fs_used_pct || 0;
+    // Use real filesystem pct for auto-clean triggering
+    _lastDiskPct = fsPct;
     const color = pct > 90 ? 'var(--red)' : pct > 75 ? '#d29922' : 'var(--green)';
     bar.style.width = pct + '%';
     bar.style.background = color;
-    el.innerHTML = '<strong>' + data.used_gb + '</strong> / ' + data.total_gb + ' GB used (' +
+    const usedMB = (data.used_gb * 1024).toFixed(1);
+    const totalMB = (data.total_gb * 1024).toFixed(1);
+    const freeMB = (data.free_gb * 1024).toFixed(1);
+    // Show in MB when values are small (< 1 GB), GB otherwise
+    const useGB = data.total_gb >= 1;
+    const usedStr = useGB ? data.used_gb + ' GB' : usedMB + ' MB';
+    const totalStr = useGB ? data.total_gb + ' GB' : totalMB + ' MB';
+    const freeStr = useGB ? data.free_gb + ' GB' : freeMB + ' MB';
+    el.innerHTML = 'Data: <strong>' + usedStr + '</strong> / ' + totalStr + ' (' +
       '<span style="color:' + color + '">' + pct + '%</span>) | ' +
-      'Free: <strong>' + data.free_gb + ' GB</strong>' +
+      'Free: <strong>' + freeStr + '</strong>' +
       (data.log_count > 0 ? ' | Logs: <strong>' + data.log_size_mb + ' MB</strong> (' + data.log_count + ' files)' : '');
-    // Warning banner for low disk space
-    if (pct > 90) {
-      warn.innerHTML = '\u26a0 <strong>CRITICAL</strong>: Disk almost full (' + pct + '%). Use Smart Clean or Deep Clean now!';
+    // Warning banner based on real filesystem usage (not data pct)
+    if (fsPct > 95 && data.free_gb < 0.01) {
+      warn.innerHTML = '\u26a0 <strong>CRITICAL</strong>: Disk almost full (free: ' + freeStr + '). Use Smart Clean or Deep Clean now!';
       warn.style.display = '';
-    } else if (pct > 80) {
-      warn.innerHTML = '\u26a0 Disk space is low (' + pct + '%). Consider cleaning old files.';
+      warn.style.color = '#f85149';
+      warn.style.background = '#f8514920';
+      warn.style.borderColor = '#f8514940';
+    } else if (fsPct > 90 && data.free_gb < 0.05) {
+      warn.innerHTML = '\u26a0 Disk space is low (free: ' + freeStr + '). Consider cleaning old files.';
       warn.style.display = '';
       warn.style.color = '#d29922';
       warn.style.background = '#d2992220';
@@ -7066,10 +7080,14 @@ class EditorHandler(BaseHTTPRequestHandler):
     def _disk_space(self) -> dict:
         """Return disk usage info with detailed breakdown.
 
-        Shows the most constrained filesystem so the user sees a warning
-        before ``No space left on device`` errors occur.  In Docker the
-        container overlay (``/``) may be much smaller than a bind-mounted
-        volume (``/work``, ``/img``).
+        Shows user-data usage relative to available capacity so that
+        system files (OS, Python, app code) inside Docker containers
+        don't inflate the displayed percentage.  The gauge answers
+        "how much of MY data space have I used?" rather than
+        "how full is the entire filesystem?".
+
+        The real filesystem free space is still shown so the user knows
+        when the disk is genuinely running out.
         """
         try:
             # Gather usage for all relevant mount points
@@ -7088,28 +7106,21 @@ class EditorHandler(BaseHTTPRequestHandler):
             seen_totals: dict[int, tuple] = {}
             for mount, u in candidates:
                 key = u.total
-                # If we already saw this total, keep the one with less free
-                # space (more constrained) – or just skip
                 if key not in seen_totals or u.free < seen_totals[key][1].free:
                     seen_totals[key] = (mount, u)
 
             unique_parts = list(seen_totals.values())
 
-            # Prefer data directories (/work, /img) over root (/) for the
-            # headline gauge.  The container root overlay is often tiny
-            # while actual data lives on mounted volumes with much more
-            # space.  Only fall back to root if no data mounts are found.
             data_parts = [(m, u) for m, u in unique_parts if m != "/"]
             if data_parts:
-                # Among data partitions, pick the most constrained
                 data_parts.sort(key=lambda x: x[1].free)
                 _primary_mount, primary = data_parts[0]
             else:
                 unique_parts.sort(key=lambda x: x[1].free)
                 _primary_mount, primary = unique_parts[0]
 
-            total = primary.total
-            used = primary.used
+            fs_total = primary.total
+            fs_used = primary.used
             free = primary.free
 
             img_dir = Path("/img")
@@ -7206,12 +7217,27 @@ class EditorHandler(BaseHTTPRequestHandler):
                 except Exception:
                     pass
 
+            # Sum all user-data sizes for a data-centric gauge.
+            user_data = (captures_size + sent_size + log_size
+                         + urf_size + tmp_size + pycache_size)
+            # "Data capacity" = user data + free space on filesystem.
+            # This excludes system files from the percentage so the user
+            # sees how much of *their* available space is consumed.
+            data_capacity = user_data + free
+            data_pct = round(user_data / data_capacity * 100, 1) if data_capacity else 0
+
+            # Also report real filesystem percentage for auto-cleanup.
+            fs_pct = round(fs_used / fs_total * 100, 1) if fs_total else 0
+
             return {
                 "ok": True,
-                "total_gb": round(total / (1024**3), 2),
-                "used_gb": round(used / (1024**3), 2),
+                "total_gb": round(data_capacity / (1024**3), 2),
+                "used_gb": round(user_data / (1024**3), 2),
                 "free_gb": round(free / (1024**3), 2),
-                "used_pct": round(used / total * 100, 1) if total else 0,
+                "used_pct": data_pct,
+                "fs_used_pct": fs_pct,
+                "fs_total_gb": round(fs_total / (1024**3), 2),
+                "fs_used_gb": round(fs_used / (1024**3), 2),
                 "log_size_mb": round(log_size / (1024**2), 2),
                 "log_count": log_count,
                 "breakdown": {
