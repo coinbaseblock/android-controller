@@ -587,7 +587,7 @@ input:focus, select:focus, textarea:focus { outline: none; border-color: var(--b
 .badge-marker { background: #55555533; color: #888; }
 .frame-desc { font-size: 13px; margin-top: 3px; color: var(--text); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .frame-note { font-size: 11px; color: var(--text2); font-style: italic; margin-top: 2px; }
-.frame-actions { display: flex; flex-direction: column; justify-content: center; gap: 2px; padding: 4px 8px; }
+.frame-actions { display: flex; flex-direction: column; justify-content: center; gap: 2px; padding: 4px 8px; flex-shrink: 0; }
 .frame-actions button { background: none; border: none; color: var(--text2); font-size: 14px; padding: 2px 4px; border-radius: 3px; }
 .frame-actions button:hover { background: var(--bg3); color: var(--text); }
 .drop-indicator { height: 3px; background: var(--blue); border-radius: 2px; margin: 2px 0; }
@@ -666,11 +666,11 @@ input:focus, select:focus, textarea:focus { outline: none; border-color: var(--b
 .btn-loop-run:disabled { opacity: .4; cursor: not-allowed; transform: none; pointer-events: none; }
 .btn-loop-run.active { background: #6e40c9; animation: pulse-loop 1.5s ease-in-out infinite; }
 @keyframes pulse-loop { 0%,100% { box-shadow: 0 0 0 0 rgba(137,87,229,.5); } 50% { box-shadow: 0 0 8px 4px rgba(137,87,229,.3); } }
-.loop-run-controls { display: flex; align-items: center; gap: 6px; }
+.loop-run-controls { display: flex; align-items: center; gap: 6px; flex-shrink: 0; flex-wrap: wrap; }
 .loop-run-controls input[type="number"] { width: 48px; padding: 2px 4px; border: 1px solid var(--border); border-radius: 4px; background: var(--bg2); color: var(--text1); font-size: 11px; text-align: center; }
 .loop-run-controls label { font-size: 10px; color: var(--text2); display: flex; align-items: center; gap: 3px; cursor: pointer; white-space: nowrap; }
 .loop-run-controls label input[type="checkbox"] { margin: 0; cursor: pointer; }
-.loop-run-status { font-size: 11px; color: var(--text2); max-width: 240px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.loop-run-status { font-size: 11px; color: var(--text2); max-width: 400px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .btn-loop-stop { background: #6e7681; border-color: #6e7681; color: #fff; display: inline-flex; align-items: center; gap: 4px; cursor: pointer; transition: all .2s ease; }
 .btn-loop-stop:hover { background: #8b949e; transform: scale(1.05); }
 
@@ -1808,9 +1808,13 @@ function refreshAll() {
 }
 
 function renderTimeline() {
-  if (!recording) { document.getElementById('timeline').innerHTML = '<p style="color:var(--text2);padding:20px">Load a file from the sidebar</p>'; return; }
+  const container = document.getElementById('timeline');
+  if (!recording) { container.innerHTML = '<p style="color:var(--text2);padding:20px">Load a file from the sidebar</p>'; return; }
   const frames = getVisibleFrames();
   document.getElementById('frameCount').textContent = frames.length + ' frames' + (frames.length !== recording.frames.length ? ' (filtered from '+recording.frames.length+')' : '');
+
+  // Preserve scroll position across re-renders to avoid flicker during loops
+  const prevScrollTop = container.scrollTop;
 
   const html = frames.map((f, idx) => {
     const sel = f.id === selectedId ? ' selected' : '';
@@ -1836,7 +1840,12 @@ function renderTimeline() {
       </div>
     </div>`;
   }).join('');
-  document.getElementById('timeline').innerHTML = html;
+  container.innerHTML = html;
+
+  // Restore scroll position so timeline doesn't jump during re-render cycles
+  if (prevScrollTop > 0) {
+    container.scrollTop = prevScrollTop;
+  }
 }
 
 function getVisibleFrames() {
@@ -3410,7 +3419,15 @@ function highlightPlayingFrame(currentStep) {
   const card = document.querySelector(`.frame-card[data-id="${targetId}"]`);
   if (card) {
     card.classList.add('playing');
-    card.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+    // Only auto-scroll if the card is not already visible in the timeline viewport
+    const container = document.getElementById('timeline');
+    if (container) {
+      const cRect = container.getBoundingClientRect();
+      const fRect = card.getBoundingClientRect();
+      if (fRect.top < cRect.top || fRect.bottom > cRect.bottom) {
+        card.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+      }
+    }
   }
 }
 

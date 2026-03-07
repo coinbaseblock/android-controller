@@ -356,18 +356,25 @@ class SequenceRunner:
         return freed
 
     def _cleanup_between_scripts(self) -> None:
-        """Non-destructive cleanup between scripts WITHIN a loop.
+        """Cleanup between scripts WITHIN a loop.
 
-        CRITICAL: Never deletes captures from the current loop to ensure
-        all stations have complete, consistent rounds. Only compresses old
-        logs and moves old files (from previous loops) to overflow.
+        Escalation strategy based on disk usage:
+          <85%  — no action
+          85-90% — compress logs, move old to overflow (non-destructive)
+          90-95% — also delete captures from PREVIOUS loops
+          95-97% — also delete already-extracted captures from current loop
+          >=97%  — emergency: delete ALL capture images (data is in JSONL)
 
-        If disk is critically full (>95%), archives old captures to HDD
-        but still preserves the current loop's data.
+        Extract data is always preserved in JSONL log files, so capture
+        images are only needed for visual debugging and can be safely
+        removed when disk space is critical.
         """
         freed = 0
         actions = []
         usage = self._disk_usage_pct()
+
+        if usage < 85:
+            return
 
         # Step 1: Compress old logs (non-destructive)
         log_saved = self._compress_old_logs()
@@ -381,24 +388,45 @@ class SequenceRunner:
             freed += overflow_freed
             actions.append(f"moved old to overflow ({overflow_freed / (1024*1024):.1f} MB)")
 
-        # Step 3: If still critical, clean old archives and cache/temp only
-        if usage >= 95:
+        # Step 3: Clean temp/cache
+        for tmp_dir in [Path("/img/cache"), Path("/img/temp")]:
+            if not tmp_dir.exists():
+                continue
+            for f in list(tmp_dir.iterdir()):
+                if not f.is_file():
+                    continue
+                try:
+                    freed += f.stat().st_size
+                    f.unlink()
+                except Exception:
+                    pass
+
+        # Step 4: At 90%+, delete captures from PREVIOUS loops
+        if usage >= 90:
+            prev_freed = self._delete_old_captures(keep_minutes=5)
+            if prev_freed > 0:
+                freed += prev_freed
+                actions.append(f"deleted old captures ({prev_freed / (1024*1024):.1f} MB)")
+
             archive_freed = self._cleanup_old_archives(keep_days=3)
             if archive_freed > 0:
                 freed += archive_freed
                 actions.append(f"cleaned old archives ({archive_freed / (1024*1024):.1f} MB)")
-            # Clean temp/cache only (not captures)
-            for tmp_dir in [Path("/img/cache"), Path("/img/temp")]:
-                if not tmp_dir.exists():
-                    continue
-                for f in list(tmp_dir.iterdir()):
-                    if not f.is_file():
-                        continue
-                    try:
-                        freed += f.stat().st_size
-                        f.unlink()
-                    except Exception:
-                        pass
+
+        # Step 5: At 95%+, archive current loop captures to overflow
+        if usage >= 95 and self.current_loop > 0:
+            arc_freed = self._archive_loop_captures(self.current_loop)
+            if arc_freed > 0:
+                freed += arc_freed
+                actions.append(f"archived current loop ({arc_freed / (1024*1024):.1f} MB)")
+
+        # Step 6: At 97%+, emergency — delete ALL capture images
+        # Extract data is already saved in JSONL, images are expendable
+        if self._disk_usage_pct() >= 97:
+            em_freed = self._delete_all_captures()
+            if em_freed > 0:
+                freed += em_freed
+                actions.append(f"emergency delete all captures ({em_freed / (1024*1024):.1f} MB)")
 
         if freed > 0:
             new_usage = self._disk_usage_pct()
@@ -508,6 +536,12 @@ class SequenceRunner:
                     self.current_script_name = script_path.name
 
                     self.log(f"--- Script [{i+1}/{len(enabled_scripts)}]: {script_path.name} ---", "SEQ")
+
+                    # Pre-flight disk check: clean proactively before script runs
+                    pre_usage = self._disk_usage_pct()
+                    if pre_usage >= 90:
+                        self.log(f"Disk at {pre_usage:.0f}% before script — running cleanup...", "WARN")
+                        self._cleanup_between_scripts()
 
                     if not script_path.exists():
                         self.log(f"File not found: {script_path}", "ERROR")
