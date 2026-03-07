@@ -359,11 +359,11 @@ class SequenceRunner:
         """Cleanup between scripts WITHIN a loop.
 
         Escalation strategy based on disk usage:
-          <85%  — no action
-          85-90% — compress logs, move old to overflow (non-destructive)
-          90-95% — also delete captures from PREVIOUS loops
-          95-97% — also delete already-extracted captures from current loop
-          >=97%  — emergency: delete ALL capture images (data is in JSONL)
+          <80%  — no action
+          80-85% — compress logs, move old to overflow (non-destructive)
+          85-90% — also delete captures older than 2 minutes
+          90-95% — also delete ALL old captures (keep_minutes=0) and archive to overflow
+          >=95%  — emergency: delete ALL capture images (data is in JSONL)
 
         Extract data is always preserved in JSONL log files, so capture
         images are only needed for visual debugging and can be safely
@@ -373,7 +373,7 @@ class SequenceRunner:
         actions = []
         usage = self._disk_usage_pct()
 
-        if usage < 85:
+        if usage < 80:
             return
 
         # Step 1: Compress old logs (non-destructive)
@@ -401,9 +401,10 @@ class SequenceRunner:
                 except Exception:
                     pass
 
-        # Step 4: At 90%+, delete captures from PREVIOUS loops
-        if usage >= 90:
-            prev_freed = self._delete_old_captures(keep_minutes=5)
+        # Step 4: At 85%+, delete captures older than 2 minutes
+        # (data already saved in JSONL logs)
+        if usage >= 85:
+            prev_freed = self._delete_old_captures(keep_minutes=2)
             if prev_freed > 0:
                 freed += prev_freed
                 actions.append(f"deleted old captures ({prev_freed / (1024*1024):.1f} MB)")
@@ -413,16 +414,22 @@ class SequenceRunner:
                 freed += archive_freed
                 actions.append(f"cleaned old archives ({archive_freed / (1024*1024):.1f} MB)")
 
-        # Step 5: At 95%+, archive current loop captures to overflow
-        if usage >= 95 and self.current_loop > 0:
-            arc_freed = self._archive_loop_captures(self.current_loop)
-            if arc_freed > 0:
-                freed += arc_freed
-                actions.append(f"archived current loop ({arc_freed / (1024*1024):.1f} MB)")
+        # Step 5: At 90%+, delete ALL old captures and archive current loop to overflow
+        if self._disk_usage_pct() >= 90:
+            all_old_freed = self._delete_old_captures(keep_minutes=0)
+            if all_old_freed > 0:
+                freed += all_old_freed
+                actions.append(f"deleted all captures ({all_old_freed / (1024*1024):.1f} MB)")
 
-        # Step 6: At 97%+, emergency — delete ALL capture images
+            if self.current_loop > 0:
+                arc_freed = self._archive_loop_captures(self.current_loop)
+                if arc_freed > 0:
+                    freed += arc_freed
+                    actions.append(f"archived current loop ({arc_freed / (1024*1024):.1f} MB)")
+
+        # Step 6: At 95%+, emergency — delete ALL capture images
         # Extract data is already saved in JSONL, images are expendable
-        if self._disk_usage_pct() >= 97:
+        if self._disk_usage_pct() >= 95:
             em_freed = self._delete_all_captures()
             if em_freed > 0:
                 freed += em_freed
@@ -539,7 +546,7 @@ class SequenceRunner:
 
                     # Pre-flight disk check: clean proactively before script runs
                     pre_usage = self._disk_usage_pct()
-                    if pre_usage >= 90:
+                    if pre_usage >= 80:
                         self.log(f"Disk at {pre_usage:.0f}% before script — running cleanup...", "WARN")
                         self._cleanup_between_scripts()
 

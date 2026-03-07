@@ -677,6 +677,16 @@ class UniversalPlayer:
             try:
                 take_screenshot(self.serial, out_path)
                 result["screenshot"] = str(out_path)
+            except OSError as e:
+                if e.errno == 28:  # ENOSPC - No space left on device
+                    self._free_disk_space(out_dir)
+                    try:
+                        take_screenshot(self.serial, out_path)
+                        result["screenshot"] = str(out_path)
+                    except Exception:
+                        result["screenshot"] = None
+                else:
+                    result["screenshot"] = None
             except Exception:
                 result["screenshot"] = None
 
@@ -691,14 +701,56 @@ class UniversalPlayer:
             log_file = log_dir / f"{stem}-extract.jsonl"
         else:
             log_file = log_dir / f"extract-{label}.jsonl"
-        with open(log_file, "a", encoding="utf-8") as f:
-            f.write(json.dumps(result, ensure_ascii=False) + "\n")
+        try:
+            with open(log_file, "a", encoding="utf-8") as f:
+                f.write(json.dumps(result, ensure_ascii=False) + "\n")
+        except OSError as e:
+            if e.errno == 28:  # ENOSPC
+                captures_dir = Path(self.recording.settings.screenshot_dir)
+                self._free_disk_space(captures_dir)
+                with open(log_file, "a", encoding="utf-8") as f:
+                    f.write(json.dumps(result, ensure_ascii=False) + "\n")
+            else:
+                raise
 
         field_count = len(result.get("fields", {}))
         text_count = len(result.get("all_text", []))
         self.log(f"  Extracted {field_count} fields, {text_count} texts -> {log_file}", "OK")
 
     # ---------- Helpers ----------
+
+    def _free_disk_space(self, captures_dir: Path) -> int:
+        """Emergency disk space cleanup when ENOSPC occurs during extract.
+
+        Deletes old capture images (PNG/JPEG) from the captures directory,
+        oldest first. Extract data is already saved in JSONL logs, so
+        capture images are expendable.
+        Returns bytes freed.
+        """
+        freed = 0
+        candidates = []
+        for d in [captures_dir, Path("/img/sent"), Path("/img/cache"), Path("/img/temp")]:
+            if not d.exists():
+                continue
+            for f in d.iterdir():
+                if f.is_file() and f.suffix.lower() in (".png", ".jpg", ".jpeg"):
+                    try:
+                        candidates.append((f.stat().st_mtime, f.stat().st_size, f))
+                    except OSError:
+                        pass
+        # Sort oldest first
+        candidates.sort(key=lambda x: x[0])
+        # Delete oldest half of captures to make room
+        delete_count = max(len(candidates) // 2, 1)
+        for _, sz, f in candidates[:delete_count]:
+            try:
+                f.unlink()
+                freed += sz
+            except OSError:
+                pass
+        if freed > 0:
+            self.log(f"  Freed {freed / (1024*1024):.1f} MB (deleted {delete_count} old captures)", "WARN")
+        return freed
 
     def _describe_frame(self, frame: Frame) -> str:
         if frame.type == "touch":
