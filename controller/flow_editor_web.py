@@ -3093,9 +3093,10 @@ async function refreshDiskSpace() {
     const color = pct > 90 ? 'var(--red)' : pct > 75 ? '#d29922' : 'var(--green)';
     bar.style.width = pct + '%';
     bar.style.background = color;
-    const usedMB = (data.used_gb * 1024).toFixed(1);
-    const totalMB = (data.total_gb * 1024).toFixed(1);
-    const freeMB = (data.free_gb * 1024).toFixed(1);
+    // Use precise MB values from API when available, fall back to GB conversion
+    const usedMB = data.used_mb != null ? data.used_mb.toFixed(1) : (data.used_gb * 1024).toFixed(1);
+    const totalMB = data.total_mb != null ? data.total_mb.toFixed(1) : (data.total_gb * 1024).toFixed(1);
+    const freeMB = data.free_mb != null ? data.free_mb.toFixed(1) : (data.free_gb * 1024).toFixed(1);
     // Show in MB when values are small (< 1 GB), GB otherwise
     const useGB = data.total_gb >= 1;
     const usedStr = useGB ? data.used_gb + ' GB' : usedMB + ' MB';
@@ -7348,6 +7349,9 @@ class EditorHandler(BaseHTTPRequestHandler):
                 "total_gb": round(data_capacity / (1024**3), 2),
                 "used_gb": round(user_data / (1024**3), 2),
                 "free_gb": round(free / (1024**3), 2),
+                "total_mb": round(data_capacity / (1024**2), 2),
+                "used_mb": round(user_data / (1024**2), 2),
+                "free_mb": round(free / (1024**2), 2),
                 "used_pct": data_pct,
                 "fs_used_pct": fs_pct,
                 "fs_total_gb": round(fs_total / (1024**3), 2),

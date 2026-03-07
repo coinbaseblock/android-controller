@@ -708,8 +708,11 @@ class UniversalPlayer:
             if e.errno == 28:  # ENOSPC
                 captures_dir = Path(self.recording.settings.screenshot_dir)
                 self._free_disk_space(captures_dir)
-                with open(log_file, "a", encoding="utf-8") as f:
-                    f.write(json.dumps(result, ensure_ascii=False) + "\n")
+                try:
+                    with open(log_file, "a", encoding="utf-8") as f:
+                        f.write(json.dumps(result, ensure_ascii=False) + "\n")
+                except OSError:
+                    self.log(f"  WARNING: Could not write extract log (disk full)", "WARN")
             else:
                 raise
 
@@ -773,6 +776,39 @@ class UniversalPlayer:
                     pass
             if freed > 0:
                 self.log(f"  Moved {moved} captures to overflow ({freed / (1024*1024):.1f} MB)", "WARN")
+
+            # Check if move actually freed space (overflow may be on same fs)
+            try:
+                u = shutil.disk_usage(str(captures_dir))
+                still_full = (u.used / u.total * 100) >= 95 if u.total else True
+            except OSError:
+                still_full = True
+            if still_full:
+                # Overflow didn't help — delete oldest captures as fallback
+                remaining = [(m, s, f) for m, s, f in candidates if f.exists()]
+                delete_count = max(len(remaining) // 2, 1)
+                del_freed = 0
+                for _, sz, f in remaining[:delete_count]:
+                    try:
+                        f.unlink()
+                        del_freed += sz
+                    except OSError:
+                        pass
+                if del_freed > 0:
+                    freed += del_freed
+                    self.log(f"  Overflow didn't help — deleted {delete_count} old captures ({del_freed / (1024*1024):.1f} MB)", "WARN")
+
+                # Also delete regenerable HTML log viewers
+                for log_dir in [Path("/work/logs"), Path("/img/logs")]:
+                    if not log_dir.exists():
+                        continue
+                    for f in log_dir.iterdir():
+                        if f.is_file() and f.suffix in (".html", ".gz"):
+                            try:
+                                freed += f.stat().st_size
+                                f.unlink()
+                            except Exception:
+                                pass
         else:
             # No overflow — delete oldest half as last resort
             delete_count = max(len(candidates) // 2, 1)
