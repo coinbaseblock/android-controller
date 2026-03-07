@@ -47,6 +47,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import shutil
 import sys
 import time
 from datetime import datetime
@@ -192,42 +193,139 @@ class SequenceRunner:
                     pass
         return freed
 
-    def _cleanup_captures(self) -> None:
-        """Free disk space between scripts using a compress-first strategy.
+    @staticmethod
+    def _disk_usage_pct() -> float:
+        """Return highest disk usage percentage across data mounts."""
+        data_pct = 0.0
+        has_data = False
+        root_pct = 0.0
+        for mount in ["/", "/work", "/img"]:
+            try:
+                u = shutil.disk_usage(mount)
+                pct = u.used / u.total * 100 if u.total else 0
+                if mount == "/":
+                    root_pct = pct
+                else:
+                    has_data = True
+                    data_pct = max(data_pct, pct)
+            except OSError:
+                pass
+        return data_pct if has_data else root_pct
 
-        Priority order (non-destructive):
-        1. Compress PNG captures to JPEG (~5x smaller, preserves files)
-        2. Compress old logs with gzip (~10x smaller)
-        3. Move old files to overflow directory (if configured)
+    def _delete_old_captures(self, keep_minutes: int = 30) -> int:
+        """Delete capture images older than keep_minutes. Returns bytes freed.
+
+        Only deletes image files (PNG/JPEG) from capture directories.
+        Never deletes extract logs (*-extract.jsonl, *-playback.json/html).
+        """
+        freed = 0
+        cutoff = time.time() - (keep_minutes * 60)
+        for cap_dir in [Path("/img/captures"), Path("/img/sent")]:
+            if not cap_dir.exists():
+                continue
+            for f in list(cap_dir.iterdir()):
+                if not f.is_file():
+                    continue
+                if f.suffix.lower() not in (".png", ".jpg", ".jpeg"):
+                    continue
+                try:
+                    st = f.stat()
+                    if st.st_mtime < cutoff:
+                        freed += st.st_size
+                        f.unlink()
+                except Exception:
+                    pass
+        return freed
+
+    def _delete_all_captures(self) -> int:
+        """Delete ALL capture images to free space in critical situations. Returns bytes freed.
+
+        Extract data is already saved in JSONL logs, so capture images
+        are only for visual debugging and can be safely removed.
+        """
+        freed = 0
+        for cap_dir in [Path("/img/captures"), Path("/img/sent")]:
+            if not cap_dir.exists():
+                continue
+            for f in list(cap_dir.iterdir()):
+                if not f.is_file():
+                    continue
+                if f.suffix.lower() not in (".png", ".jpg", ".jpeg"):
+                    continue
+                try:
+                    freed += f.stat().st_size
+                    f.unlink()
+                except Exception:
+                    pass
+        # Also clean temp/cache
+        for tmp_dir in [Path("/img/cache"), Path("/img/temp")]:
+            if not tmp_dir.exists():
+                continue
+            for f in list(tmp_dir.iterdir()):
+                if not f.is_file():
+                    continue
+                try:
+                    freed += f.stat().st_size
+                    f.unlink()
+                except Exception:
+                    pass
+        return freed
+
+    def _cleanup_captures(self) -> None:
+        """Free disk space between scripts with disk-aware escalation.
+
+        Strategy based on current disk usage:
+        - Below 80%: non-destructive only (compress logs, move to overflow)
+        - 80-90%: delete captures older than 10 minutes
+        - 90-95%: delete captures older than 2 minutes
+        - Above 95%: delete ALL captures (data is safe in JSONL logs)
         """
         freed = 0
         actions = []
 
-        # Step 1: Compress images (non-destructive)
-        img_saved = self._compress_captures()
-        if img_saved > 0:
-            freed += img_saved
-            actions.append(f"compressed images ({img_saved / (1024*1024):.1f} MB)")
+        usage = self._disk_usage_pct()
 
-        # Step 2: Compress old logs (non-destructive)
+        # Step 1: Always try non-destructive methods
         log_saved = self._compress_old_logs()
         if log_saved > 0:
             freed += log_saved
             actions.append(f"compressed logs ({log_saved / (1024*1024):.1f} MB)")
 
-        # Step 3: Move to overflow (non-destructive, preserves on secondary)
         overflow_freed = self._move_to_overflow()
         if overflow_freed > 0:
             freed += overflow_freed
             actions.append(f"moved to overflow ({overflow_freed / (1024*1024):.1f} MB)")
 
-        # No auto-deletion here: keep history visible and avoid unexpected data loss.
+        # Step 2: Disk-aware escalation - delete captures when needed
+        if usage >= 95:
+            # Critical: delete ALL captures to prevent disk-full errors
+            cap_freed = self._delete_all_captures()
+            if cap_freed > 0:
+                freed += cap_freed
+                actions.append(f"deleted all captures ({cap_freed / (1024*1024):.1f} MB)")
+        elif usage >= 90:
+            # High: delete captures older than 2 minutes
+            cap_freed = self._delete_old_captures(keep_minutes=2)
+            if cap_freed > 0:
+                freed += cap_freed
+                actions.append(f"deleted old captures >2min ({cap_freed / (1024*1024):.1f} MB)")
+        elif usage >= 80:
+            # Warning: delete captures older than 10 minutes
+            cap_freed = self._delete_old_captures(keep_minutes=10)
+            if cap_freed > 0:
+                freed += cap_freed
+                actions.append(f"deleted old captures >10min ({cap_freed / (1024*1024):.1f} MB)")
 
         if freed > 0:
+            new_usage = self._disk_usage_pct()
             self.log(
-                f"Cleanup: {freed / (1024*1024):.1f} MB freed ({', '.join(actions)})",
+                f"Cleanup: {freed / (1024*1024):.1f} MB freed ({', '.join(actions)}) "
+                f"[disk: {usage:.0f}% -> {new_usage:.0f}%]",
                 "OK",
             )
+        elif usage >= 85:
+            # Warn even if nothing was freed
+            self.log(f"Disk usage high ({usage:.0f}%) but no files to clean", "WARN")
 
     def run(self) -> int:
         """Run the sequence. Returns 0 on success."""
