@@ -1186,6 +1186,7 @@ input:focus, select:focus, textarea:focus { outline: none; border-color: var(--b
               <button class="btn btn-sm" onclick="refreshDiskSpace()" title="Refresh disk space info">Refresh</button>
               <button class="btn btn-sm" onclick="smartClean()" title="Smart clean: keep recent files (6h), delete older ones" style="color:#d29922;border-color:#d2992240">Smart Clean</button>
               <button class="btn btn-sm btn-danger" onclick="deepClean()" title="Deep clean: remove ALL captures, sent images, logs, cache, temp files">Deep Clean</button>
+              <button class="btn btn-sm" onclick="clearWorkspace()" title="Clear all except scripts and extract data: frees maximum space while preserving your recordings and charger data" style="color:#f0f6fc;background:#8b5cf6;border-color:#8b5cf680">Clear Workspace</button>
             </div>
             <div style="margin-top:6px;font-size:10px;color:var(--text2);display:flex;align-items:center;gap:6px;flex-wrap:wrap">
               <label style="display:flex;align-items:center;gap:4px;cursor:pointer">
@@ -3117,7 +3118,7 @@ async function refreshDiskSpace() {
       (data.log_count > 0 ? ' | Logs: <strong>' + data.log_size_mb + ' MB</strong> (' + data.log_count + ' files)' : '');
     // Warning banner based on real filesystem usage (not data pct)
     if (fsPct > 95 && data.free_gb < 0.01) {
-      warn.innerHTML = '\u26a0 <strong>CRITICAL</strong>: Disk almost full (free: ' + freeStr + '). Use Smart Clean or Deep Clean now!';
+      warn.innerHTML = '\u26a0 <strong>CRITICAL</strong>: Disk almost full (free: ' + freeStr + '). Use <strong>Clear Workspace</strong>, Smart Clean or Deep Clean now!';
       warn.style.display = '';
       warn.style.color = '#f85149';
       warn.style.background = '#f8514920';
@@ -3217,6 +3218,34 @@ async function smartClean() {
       toast(msg, 'success');
     } else {
       toast('Smart clean error: ' + (res.error || 'unknown'), 'error');
+    }
+    refreshExtractLogs();
+    refreshStationLogs();
+    refreshDiskSpace();
+  } catch (e) { toast('Error: ' + e.message, 'error'); }
+}
+
+async function clearWorkspace() {
+  if (!confirm('Clear Workspace: Delete captures, sent images, cache, temp files, and transient logs?\\n\\nPRESERVED (not deleted):\\n  - Your .urf.json scripts\\n  - Extract logs (charger data)\\n  - Station playback logs\\n  - Sequence files\\n\\nThis frees maximum space while keeping your important data.')) return;
+  try {
+    toast('Clearing workspace (preserving scripts & extract data)...', 'info');
+    const res = await api('POST', '/clear-workspace', {});
+    if (res.ok) {
+      let msg = 'Workspace cleared! Deleted ' + res.deleted + ' files, freed ' + res.freed_mb + ' MB';
+      if (res.details) {
+        const d = res.details;
+        const parts = [];
+        if (d.captures > 0) parts.push(d.captures + ' captures');
+        if (d.sent > 0) parts.push(d.sent + ' sent imgs');
+        if (d.logs > 0) parts.push(d.logs + ' transient logs');
+        if (d.pycache > 0) parts.push(d.pycache + ' cache');
+        if (d.tmp > 0) parts.push(d.tmp + ' temp');
+        if (d.system_cache > 0) parts.push(d.system_cache + ' sys cache');
+        if (parts.length > 0) msg += ' (' + parts.join(', ') + ')';
+      }
+      toast(msg, 'success');
+    } else {
+      toast('Clear workspace error: ' + (res.error || 'unknown'), 'error');
     }
     refreshExtractLogs();
     refreshStationLogs();
@@ -5649,7 +5678,14 @@ function render(data) {
 
   if (!stations.length) {
     summaryEl.innerHTML = '';
-    mainEl.innerHTML = '<div class="empty-state"><div class="icon">📭</div><p>No charger data found in extract logs.</p><p style="font-size:12px;margin-top:8px;color:#6e7681">Run a recording that captures charger detail pages (ctrl_capture_4 through ctrl_capture_7).</p></div>';
+    mainEl.innerHTML = '<div class="empty-state"><div class="icon">📭</div><p>No charger data found in extract logs.</p><p style="font-size:12px;margin-top:8px;color:#6e7681">Run a recording that captures charger detail pages (ctrl_capture_4 through ctrl_capture_7).</p><div id="diskWarnCharger"></div></div>';
+    // Check disk space asynchronously and show warning if full
+    fetch('/api/disk-space').then(r => r.json()).then(disk => {
+      if (disk.ok && disk.free_mb < 1) {
+        const el = document.getElementById('diskWarnCharger');
+        if (el) el.innerHTML = '<p style="font-size:12px;margin-top:12px;color:#f85149;background:#f8514920;border:1px solid #f8514940;border-radius:6px;padding:8px 12px">⚠ Disk is full (' + disk.free_mb.toFixed(1) + ' MB free). Use <strong>Clear Workspace</strong> in the editor to free space before recording.</p>';
+      }
+    }).catch(function(){});
     return;
   }
 
@@ -6087,6 +6123,8 @@ class EditorHandler(BaseHTTPRequestHandler):
             self._json(self._clear_all_logs())
         elif path == "/api/deep-clean":
             self._json(self._deep_clean())
+        elif path == "/api/clear-workspace":
+            self._json(self._clear_workspace())
         elif path == "/api/smart-clean":
             keep_hours = body.get("keep_hours", 6)
             self._json(self._smart_clean(keep_hours=keep_hours))
@@ -7604,6 +7642,137 @@ class EditorHandler(BaseHTTPRequestHandler):
             "deleted": deleted,
             "freed_mb": round(freed / (1024**2), 2),
             "details": details,
+            "errors": errors[:10],
+        }
+
+    def _clear_workspace(self) -> dict:
+        """Clear workspace to free disk space while preserving important data.
+
+        Deletes:
+          - /img/captures (screenshot images)
+          - /img/sent (sent images)
+          - Non-extract log files (transient playback logs, etc.)
+          - __pycache__ directories
+          - Temp files (*.tmp, *.bak, *.pyc, .tmp_*)
+          - System cache (/var/cache/apt, /tmp, /var/tmp)
+
+        Preserves (NEVER deleted):
+          - .urf.json scripts in work_dir (user-created scripts)
+          - Extract log files (*-extract.jsonl) — needed for charger-view
+          - Station playback logs (*-playback.json, *-playback.html)
+          - Sequence files (*.seq.json)
+          - Overflow config (.overflow_config)
+        """
+        deleted = 0
+        freed = 0
+        errors = []
+        details = {}
+
+        # 1. Clear /img/captures
+        cap_dir = Path("/img/captures")
+        cap_del = 0
+        if cap_dir.exists():
+            for p in cap_dir.rglob("*"):
+                if p.is_file():
+                    try:
+                        freed += p.stat().st_size
+                        p.unlink()
+                        deleted += 1
+                        cap_del += 1
+                    except Exception as e:
+                        errors.append(f"capture {p.name}: {e}")
+        details["captures"] = cap_del
+
+        # 2. Clear /img/sent
+        sent_dir = Path("/img/sent")
+        sent_del = 0
+        if sent_dir.exists():
+            for p in sent_dir.rglob("*"):
+                if p.is_file():
+                    try:
+                        freed += p.stat().st_size
+                        p.unlink()
+                        deleted += 1
+                        sent_del += 1
+                    except Exception as e:
+                        errors.append(f"sent {p.name}: {e}")
+        details["sent"] = sent_del
+
+        # 3. Clear transient log files but PRESERVE extract logs and station data
+        log_del = 0
+        for log_dir in [Path(self.work_dir) / "logs", Path("/img/logs")]:
+            if not log_dir.exists():
+                continue
+            for p in log_dir.iterdir():
+                if not p.is_file():
+                    continue
+                # Preserve extract logs (charger-view depends on these)
+                if p.name.endswith("-extract.jsonl") or p.name.startswith("extract-"):
+                    continue
+                # Preserve station playback logs
+                if p.name.endswith("-playback.json") or p.name.endswith("-playback.html"):
+                    continue
+                try:
+                    freed += p.stat().st_size
+                    p.unlink()
+                    deleted += 1
+                    log_del += 1
+                except Exception as e:
+                    errors.append(f"log {p.name}: {e}")
+        details["logs"] = log_del
+
+        # 4. Clear __pycache__
+        pc_del = 0
+        for d in [Path(self.work_dir), Path("/usr/local/bin")]:
+            for pc in list(d.rglob("__pycache__")):
+                if pc.is_dir():
+                    try:
+                        for f in pc.rglob("*"):
+                            if f.is_file():
+                                freed += f.stat().st_size
+                                f.unlink()
+                                deleted += 1
+                                pc_del += 1
+                        shutil.rmtree(pc, ignore_errors=True)
+                    except Exception as e:
+                        errors.append(f"pycache: {e}")
+        details["pycache"] = pc_del
+
+        # 5. Clear temp files in work dir (but not scripts or seq files)
+        tmp_del = 0
+        work = Path(self.work_dir)
+        for pattern in ["*.tmp", "*.bak", "*.pyc", ".tmp_*"]:
+            for f in work.glob(pattern):
+                try:
+                    freed += f.stat().st_size
+                    f.unlink()
+                    deleted += 1
+                    tmp_del += 1
+                except Exception as e:
+                    errors.append(f"tmp {f.name}: {e}")
+        details["tmp"] = tmp_del
+
+        # 6. Clean system cache
+        sys_del = 0
+        for sys_dir in [Path("/var/cache/apt"), Path("/tmp"), Path("/var/tmp")]:
+            if sys_dir.exists():
+                for p in sys_dir.rglob("*"):
+                    if p.is_file():
+                        try:
+                            freed += p.stat().st_size
+                            p.unlink()
+                            deleted += 1
+                            sys_del += 1
+                        except Exception:
+                            pass
+        details["system_cache"] = sys_del
+
+        return {
+            "ok": True,
+            "deleted": deleted,
+            "freed_mb": round(freed / (1024**2), 2),
+            "details": details,
+            "preserved": ["*.urf.json scripts", "extract logs (*-extract.jsonl)", "station playback logs", "sequence files"],
             "errors": errors[:10],
         }
 
