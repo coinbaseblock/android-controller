@@ -7364,7 +7364,7 @@ class EditorHandler(BaseHTTPRequestHandler):
                     # If still 0, set a nominal floor so the UI does not
                     # show a false CRITICAL warning.
                     if free == 0:
-                        free = 500 * 1024 * 1024          # 500 MB nominal
+                        free = 10 * 1024 * 1024 * 1024    # 10 GB nominal
                         fs_total = fs_used + free
                 except OSError:
                     pass  # Disk is genuinely full
