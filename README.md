@@ -362,6 +362,12 @@ docker compose exec controller universal-player.py /work/demo.urf.json --debug-p
 .\scripts\delete-old-images.ps1
 .\scripts\delete-old-images.ps1 -OlderThanDays 3 -Force
 
+# ล้างพื้นที่แบบครบชุด + รายงานก่อนลบ
+.\scripts\clear-storage.ps1 -ReportOnly
+.\scripts\clear-storage.ps1 -TargetFreeGB 15 -OlderThanDays 5 -PruneDocker -Force
+# แบบหนัก (รวม unused volumes ของ Docker)
+.\scripts\clear-storage.ps1 -TargetFreeGB 20 -PruneDocker -AggressiveDocker -Force
+
 # ปลุกหน้าจอ
 .\scripts\awake-device.ps1
 
@@ -424,6 +430,7 @@ overlay-touches.py /work/touch-events.json /work/ui-dumps/20240901-120000-login-
 | **Control Device** | `control-device.ps1` | สั่ง tap/swipe/key จาก Windows |
 | **Screenshot** | `capture-screenshot.ps1` | จับภาพจาก Windows |
 | **Delete Old Images** | `delete-old-images.ps1` | ลบรูปเก่าในโฟลเดอร์ `img` ตามจำนวนวัน |
+| **Clear Storage** | `clear-storage.ps1` | ล้างไฟล์ที่เกิดจากการใช้งาน + ตั้งเป้า free space และเลือก prune Docker ได้ |
 | **Connect Wireless** | `connect-wireless.ps1` | เชื่อมต่อ Wi-Fi อัตโนมัติ |
 | **Awake Device** | `awake-device.ps1` | ปลุกหน้าจอ |
 
