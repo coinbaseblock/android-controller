@@ -7483,6 +7483,101 @@ class EditorHandler(BaseHTTPRequestHandler):
         return (name.endswith("-extract.jsonl") or name.startswith("extract-")
                 or name.endswith("-playback.json") or name.endswith("-playback.html"))
 
+    @staticmethod
+    def _safe_delete(p: Path) -> int:
+        """Delete a file, truncating first to free blocks held by open fds.
+
+        On Linux, unlink() only removes the directory entry.  If another
+        process still holds the file open, the disk blocks remain allocated
+        until the last fd is closed.  By truncating to 0 bytes *before*
+        unlinking we release the blocks immediately regardless of open fds.
+
+        Returns the original file size (bytes freed).
+        """
+        try:
+            sz = p.stat().st_size
+        except OSError:
+            return 0
+        # Truncate first – this frees blocks even if another process has
+        # the file open (the fd now points to a 0-byte file).
+        try:
+            with p.open("r+b") as fh:
+                fh.truncate(0)
+        except OSError:
+            pass
+        try:
+            p.unlink()
+        except OSError:
+            pass
+        return sz
+
+    @staticmethod
+    def _free_deleted_open_files() -> int:
+        """Free disk space held by deleted-but-still-open files.
+
+        When a file is unlinked while a process still has it open, Linux
+        keeps the blocks allocated.  We scan /proc/*/fd for links that
+        point to '(deleted)' files, and truncate them to release space.
+
+        Returns approximate bytes freed.
+        """
+        freed = 0
+        proc = Path("/proc")
+        if not proc.exists():
+            return 0
+        for pid_dir in proc.iterdir():
+            if not pid_dir.name.isdigit():
+                continue
+            fd_dir = pid_dir / "fd"
+            try:
+                for fd_link in fd_dir.iterdir():
+                    try:
+                        target = os.readlink(str(fd_link))
+                        if "(deleted)" not in target:
+                            continue
+                        # Only free files in data directories, not system files
+                        if not any(target.startswith(pfx) for pfx in
+                                   ("/img/", "/work/", "/tmp/", "/var/tmp/")):
+                            continue
+                        fd_path = str(fd_link)
+                        try:
+                            st = os.stat(fd_path)
+                            if st.st_size > 0:
+                                with open(fd_path, "w") as fh:
+                                    fh.truncate(0)
+                                freed += st.st_size
+                        except OSError:
+                            pass
+                    except OSError:
+                        continue
+            except OSError:
+                continue
+        return freed
+
+    @staticmethod
+    def _sync_and_drop_caches():
+        """Flush filesystem buffers and drop kernel caches to reclaim space."""
+        try:
+            os.sync()
+        except OSError:
+            pass
+        # Drop kernel page/dentry/inode caches if possible (needs root)
+        try:
+            Path("/proc/sys/vm/drop_caches").write_text("3")
+        except OSError:
+            pass
+
+    def _finalize_cleanup(self, result: dict) -> dict:
+        """Post-cleanup: free deleted-open files, sync, and report."""
+        extra_freed = self._free_deleted_open_files()
+        self._sync_and_drop_caches()
+        if extra_freed > 0:
+            result["freed_mb"] = round(
+                (result.get("freed_mb", 0) * (1024**2) + extra_freed) / (1024**2), 2
+            )
+            result["freed_open_files_mb"] = round(extra_freed / (1024**2), 2)
+        return result
+
     def _deep_clean(self) -> dict:
         """Aggressively clean disk space: logs, captures, sent images, temp files, __pycache__.
 
@@ -7521,21 +7616,17 @@ class EditorHandler(BaseHTTPRequestHandler):
                                 errors.append(f"move {p.name}: {e}")
                             continue
                         # No overflow — Deep Clean is destructive by design, delete it
-                        try:
-                            freed += p.stat().st_size
-                            p.unlink()
+                        sz = self._safe_delete(p)
+                        if sz:
+                            freed += sz
                             deleted += 1
                             log_del += 1
-                        except Exception as e:
-                            errors.append(f"log {p.name}: {e}")
                         continue
-                    try:
-                        freed += p.stat().st_size
-                        p.unlink()
+                    sz = self._safe_delete(p)
+                    if sz:
+                        freed += sz
                         deleted += 1
                         log_del += 1
-                    except Exception as e:
-                        errors.append(f"log {p.name}: {e}")
         details["logs"] = log_del
         details["logs_moved"] = log_moved
 
@@ -7556,7 +7647,7 @@ class EditorHandler(BaseHTTPRequestHandler):
                             shutil.move(str(p), str(overflow_caps / p.name))
                             cap_moved += 1
                         else:
-                            p.unlink()
+                            self._safe_delete(p)
                             cap_del += 1
                         freed += sz
                         deleted += 1
@@ -7582,7 +7673,7 @@ class EditorHandler(BaseHTTPRequestHandler):
                             shutil.move(str(p), str(overflow_sent / p.name))
                             sent_moved += 1
                         else:
-                            p.unlink()
+                            self._safe_delete(p)
                             sent_del += 1
                         freed += sz
                         deleted += 1
@@ -7599,8 +7690,7 @@ class EditorHandler(BaseHTTPRequestHandler):
                     try:
                         for f in pc.rglob("*"):
                             if f.is_file():
-                                freed += f.stat().st_size
-                                f.unlink()
+                                freed += self._safe_delete(f)
                                 deleted += 1
                                 pc_del += 1
                         shutil.rmtree(pc, ignore_errors=True)
@@ -7613,13 +7703,11 @@ class EditorHandler(BaseHTTPRequestHandler):
         work = Path(self.work_dir)
         for pattern in ["*.tmp", "*.bak", "*.pyc", ".tmp_*"]:
             for f in work.glob(pattern):
-                try:
-                    freed += f.stat().st_size
-                    f.unlink()
+                sz = self._safe_delete(f)
+                if sz:
+                    freed += sz
                     deleted += 1
                     tmp_del += 1
-                except Exception as e:
-                    errors.append(f"tmp {f.name}: {e}")
         details["tmp"] = tmp_del
 
         # 6. Clean apt cache and other system temp files
@@ -7628,22 +7716,21 @@ class EditorHandler(BaseHTTPRequestHandler):
             if sys_dir.exists():
                 for p in sys_dir.rglob("*"):
                     if p.is_file():
-                        try:
-                            freed += p.stat().st_size
-                            p.unlink()
+                        sz = self._safe_delete(p)
+                        if sz:
+                            freed += sz
                             deleted += 1
                             sys_del += 1
-                        except Exception:
-                            pass
         details["system_cache"] = sys_del
 
-        return {
+        result = {
             "ok": True,
             "deleted": deleted,
             "freed_mb": round(freed / (1024**2), 2),
             "details": details,
             "errors": errors[:10],
         }
+        return self._finalize_cleanup(result)
 
     def _clear_workspace(self) -> dict:
         """Clear workspace to free disk space while preserving important data.
@@ -7674,13 +7761,11 @@ class EditorHandler(BaseHTTPRequestHandler):
         if cap_dir.exists():
             for p in cap_dir.rglob("*"):
                 if p.is_file():
-                    try:
-                        freed += p.stat().st_size
-                        p.unlink()
+                    sz = self._safe_delete(p)
+                    if sz:
+                        freed += sz
                         deleted += 1
                         cap_del += 1
-                    except Exception as e:
-                        errors.append(f"capture {p.name}: {e}")
         details["captures"] = cap_del
 
         # 2. Clear /img/sent
@@ -7689,13 +7774,11 @@ class EditorHandler(BaseHTTPRequestHandler):
         if sent_dir.exists():
             for p in sent_dir.rglob("*"):
                 if p.is_file():
-                    try:
-                        freed += p.stat().st_size
-                        p.unlink()
+                    sz = self._safe_delete(p)
+                    if sz:
+                        freed += sz
                         deleted += 1
                         sent_del += 1
-                    except Exception as e:
-                        errors.append(f"sent {p.name}: {e}")
         details["sent"] = sent_del
 
         # 3. Clear transient log files but PRESERVE extract logs and station data
@@ -7712,13 +7795,11 @@ class EditorHandler(BaseHTTPRequestHandler):
                 # Preserve station playback logs
                 if p.name.endswith("-playback.json") or p.name.endswith("-playback.html"):
                     continue
-                try:
-                    freed += p.stat().st_size
-                    p.unlink()
+                sz = self._safe_delete(p)
+                if sz:
+                    freed += sz
                     deleted += 1
                     log_del += 1
-                except Exception as e:
-                    errors.append(f"log {p.name}: {e}")
         details["logs"] = log_del
 
         # 4. Clear __pycache__
@@ -7729,8 +7810,7 @@ class EditorHandler(BaseHTTPRequestHandler):
                     try:
                         for f in pc.rglob("*"):
                             if f.is_file():
-                                freed += f.stat().st_size
-                                f.unlink()
+                                freed += self._safe_delete(f)
                                 deleted += 1
                                 pc_del += 1
                         shutil.rmtree(pc, ignore_errors=True)
@@ -7743,13 +7823,11 @@ class EditorHandler(BaseHTTPRequestHandler):
         work = Path(self.work_dir)
         for pattern in ["*.tmp", "*.bak", "*.pyc", ".tmp_*"]:
             for f in work.glob(pattern):
-                try:
-                    freed += f.stat().st_size
-                    f.unlink()
+                sz = self._safe_delete(f)
+                if sz:
+                    freed += sz
                     deleted += 1
                     tmp_del += 1
-                except Exception as e:
-                    errors.append(f"tmp {f.name}: {e}")
         details["tmp"] = tmp_del
 
         # 6. Clean system cache
@@ -7758,16 +7836,14 @@ class EditorHandler(BaseHTTPRequestHandler):
             if sys_dir.exists():
                 for p in sys_dir.rglob("*"):
                     if p.is_file():
-                        try:
-                            freed += p.stat().st_size
-                            p.unlink()
+                        sz = self._safe_delete(p)
+                        if sz:
+                            freed += sz
                             deleted += 1
                             sys_del += 1
-                        except Exception:
-                            pass
         details["system_cache"] = sys_del
 
-        return {
+        result = {
             "ok": True,
             "deleted": deleted,
             "freed_mb": round(freed / (1024**2), 2),
@@ -7775,6 +7851,7 @@ class EditorHandler(BaseHTTPRequestHandler):
             "preserved": ["*.urf.json scripts", "extract logs (*-extract.jsonl)", "station playback logs", "sequence files"],
             "errors": errors[:10],
         }
+        return self._finalize_cleanup(result)
 
     def _smart_clean(self, keep_hours: int = 6) -> dict:
         """Clean old files while keeping recent ones (within keep_hours).
@@ -7815,8 +7892,8 @@ class EditorHandler(BaseHTTPRequestHandler):
                 try:
                     st = p.stat()
                     if st.st_mtime < cutoff:
-                        freed += st.st_size
-                        p.unlink()
+                        sz = self._safe_delete(p)
+                        freed += sz
                         deleted += 1
                         count += 1
                 except Exception as e:
@@ -7858,19 +7935,17 @@ class EditorHandler(BaseHTTPRequestHandler):
                             errors.append(f"move {p.name}: {e}")
                     elif disk_pct >= 95:
                         # No overflow and disk critical — delete old station data
-                        try:
-                            freed += st.st_size
-                            p.unlink()
+                        sz = self._safe_delete(p)
+                        if sz:
+                            freed += sz
                             deleted += 1
                             log_total += 1
-                        except Exception as e:
-                            errors.append(f"log {p.name}: {e}")
                     continue
                 try:
                     st = p.stat()
                     if st.st_mtime < cutoff:
-                        freed += st.st_size
-                        p.unlink()
+                        sz = self._safe_delete(p)
+                        freed += sz
                         deleted += 1
                         log_total += 1
                 except Exception as e:
@@ -7886,8 +7961,7 @@ class EditorHandler(BaseHTTPRequestHandler):
                     try:
                         for f in pc.rglob("*"):
                             if f.is_file():
-                                freed += f.stat().st_size
-                                f.unlink()
+                                freed += self._safe_delete(f)
                                 deleted += 1
                                 pc_del += 1
                         shutil.rmtree(pc, ignore_errors=True)
@@ -7899,13 +7973,11 @@ class EditorHandler(BaseHTTPRequestHandler):
         work = Path(self.work_dir)
         for pattern in ["*.tmp", "*.bak", "*.pyc", ".tmp_*"]:
             for f in work.glob(pattern):
-                try:
-                    freed += f.stat().st_size
-                    f.unlink()
+                sz = self._safe_delete(f)
+                if sz:
+                    freed += sz
                     deleted += 1
                     tmp_del += 1
-                except Exception as e:
-                    errors.append(f"tmp {f.name}: {e}")
         details["tmp"] = tmp_del
 
         # System cache
@@ -7914,16 +7986,14 @@ class EditorHandler(BaseHTTPRequestHandler):
             if sys_dir.exists():
                 for p in sys_dir.rglob("*"):
                     if p.is_file():
-                        try:
-                            freed += p.stat().st_size
-                            p.unlink()
+                        sz = self._safe_delete(p)
+                        if sz:
+                            freed += sz
                             deleted += 1
                             sys_del += 1
-                        except Exception:
-                            pass
         details["system_cache"] = sys_del
 
-        return {
+        result = {
             "ok": True,
             "deleted": deleted,
             "freed_mb": round(freed / (1024**2), 2),
@@ -7931,6 +8001,7 @@ class EditorHandler(BaseHTTPRequestHandler):
             "keep_hours": keep_hours,
             "errors": errors[:10],
         }
+        return self._finalize_cleanup(result)
 
     def _auto_cleanup(self, threshold_pct: float = 95.0) -> dict | None:
         """Auto-cleanup when disk usage exceeds threshold.
@@ -8372,13 +8443,12 @@ class EditorHandler(BaseHTTPRequestHandler):
         if cap_dir.exists():
             for p in cap_dir.rglob("*"):
                 if p.is_file():
-                    try:
-                        freed += p.stat().st_size
-                        p.unlink()
+                    sz = self._safe_delete(p)
+                    if sz:
+                        freed += sz
                         deleted += 1
-                    except Exception as e:
-                        errors.append(f"{p.name}: {e}")
-        return {"ok": True, "deleted": deleted, "freed_mb": round(freed / (1024**2), 2), "errors": errors}
+        result = {"ok": True, "deleted": deleted, "freed_mb": round(freed / (1024**2), 2), "errors": errors}
+        return self._finalize_cleanup(result)
 
     def _delete_all_sent(self) -> dict:
         """Delete all sent images."""
@@ -8389,13 +8459,12 @@ class EditorHandler(BaseHTTPRequestHandler):
         if sent_dir.exists():
             for p in sent_dir.rglob("*"):
                 if p.is_file():
-                    try:
-                        freed += p.stat().st_size
-                        p.unlink()
+                    sz = self._safe_delete(p)
+                    if sz:
+                        freed += sz
                         deleted += 1
-                    except Exception as e:
-                        errors.append(f"{p.name}: {e}")
-        return {"ok": True, "deleted": deleted, "freed_mb": round(freed / (1024**2), 2), "errors": errors}
+        result = {"ok": True, "deleted": deleted, "freed_mb": round(freed / (1024**2), 2), "errors": errors}
+        return self._finalize_cleanup(result)
 
     # -------- Delete / Clear Log endpoints --------
 
@@ -8405,11 +8474,9 @@ class EditorHandler(BaseHTTPRequestHandler):
         errors = []
         for log_dir in self._extract_log_dirs():
             for p in list(log_dir.glob("*-extract.jsonl")) + list(log_dir.glob("extract-*.jsonl")):
-                try:
-                    p.unlink()
-                    deleted += 1
-                except Exception as e:
-                    errors.append(f"{p.name}: {e}")
+                self._safe_delete(p)
+                deleted += 1
+        self._sync_and_drop_caches()
         return {"ok": True, "deleted": deleted, "errors": errors}
 
     def _delete_all_station_logs(self) -> dict:
@@ -8419,11 +8486,8 @@ class EditorHandler(BaseHTTPRequestHandler):
         errors = []
         if log_dir.exists():
             for p in list(log_dir.glob("station-*-playback.json")):
-                try:
-                    p.unlink()
-                    deleted += 1
-                except Exception as e:
-                    errors.append(f"{p.name}: {e}")
+                self._safe_delete(p)
+                deleted += 1
         # Invalidate cache so next read reflects deletion immediately
         EditorHandler._station_logs_cache = None
         return {"ok": True, "deleted": deleted, "errors": errors}
@@ -8437,21 +8501,17 @@ class EditorHandler(BaseHTTPRequestHandler):
         if log_dir.exists():
             for p in log_dir.iterdir():
                 if p.is_file():
-                    try:
-                        p.unlink()
-                        deleted += 1
-                    except Exception as e:
-                        errors.append(f"{p.name}: {e}")
+                    self._safe_delete(p)
+                    deleted += 1
         # Also clear /img/logs (where the player writes extract logs)
         img_log = Path("/img/logs")
         if img_log.exists() and img_log.resolve() != log_dir.resolve():
             for p in img_log.iterdir():
                 if p.is_file():
-                    try:
-                        p.unlink()
-                        deleted += 1
-                    except Exception as e:
-                        errors.append(f"{p.name}: {e}")
+                    self._safe_delete(p)
+                    deleted += 1
+        self._free_deleted_open_files()
+        self._sync_and_drop_caches()
         return {"ok": True, "deleted": deleted, "errors": errors}
 
     def _delete_single_log(self, body: dict) -> dict:
@@ -8466,11 +8526,9 @@ class EditorHandler(BaseHTTPRequestHandler):
         resolved = p.resolve()
         if not any(self._is_under(resolved, d) for d in allowed_dirs):
             return {"error": "Cannot delete files outside allowed directories"}
-        try:
-            p.unlink()
-            return {"ok": True}
-        except Exception as e:
-            return {"error": str(e)}
+        self._safe_delete(p)
+        self._sync_and_drop_caches()
+        return {"ok": True}
 
     # -------- Download Log endpoints --------
 
