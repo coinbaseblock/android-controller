@@ -739,6 +739,32 @@ class UniversalPlayer:
             return p
         return None
 
+    @staticmethod
+    def _safe_delete(p: Path) -> int:
+        """Delete a file, truncating first to free blocks held by open fds.
+
+        On Linux, unlink() only removes the directory entry.  If another
+        process still holds the file open, the disk blocks remain allocated
+        until the last fd is closed.  By truncating to 0 bytes *before*
+        unlinking we release the blocks immediately regardless of open fds.
+
+        Returns the original file size (bytes freed).
+        """
+        try:
+            sz = p.stat().st_size
+        except OSError:
+            return 0
+        try:
+            with p.open("r+b") as fh:
+                fh.truncate(0)
+        except OSError:
+            pass
+        try:
+            p.unlink()
+        except OSError:
+            pass
+        return sz
+
     def _free_disk_space(self, captures_dir: Path) -> int:
         """Emergency disk space recovery when ENOSPC occurs during extract.
 
@@ -789,11 +815,7 @@ class UniversalPlayer:
                 delete_count = max(len(remaining) // 2, 1)
                 del_freed = 0
                 for _, sz, f in remaining[:delete_count]:
-                    try:
-                        f.unlink()
-                        del_freed += sz
-                    except OSError:
-                        pass
+                    del_freed += self._safe_delete(f)
                 if del_freed > 0:
                     freed += del_freed
                     self.log(f"  Overflow didn't help — deleted {delete_count} old captures ({del_freed / (1024*1024):.1f} MB)", "WARN")
@@ -804,22 +826,20 @@ class UniversalPlayer:
                         continue
                     for f in log_dir.iterdir():
                         if f.is_file() and f.suffix in (".html", ".gz"):
-                            try:
-                                freed += f.stat().st_size
-                                f.unlink()
-                            except Exception:
-                                pass
+                            freed += self._safe_delete(f)
         else:
             # No overflow — delete oldest half as last resort
             delete_count = max(len(candidates) // 2, 1)
             for _, sz, f in candidates[:delete_count]:
-                try:
-                    f.unlink()
-                    freed += sz
-                except OSError:
-                    pass
+                freed += self._safe_delete(f)
             if freed > 0:
                 self.log(f"  Freed {freed / (1024*1024):.1f} MB (deleted {delete_count} old captures)", "WARN")
+
+        # Sync filesystem to ensure freed blocks are visible immediately
+        try:
+            os.sync()
+        except OSError:
+            pass
         return freed
 
     def _describe_frame(self, frame: Frame) -> str:

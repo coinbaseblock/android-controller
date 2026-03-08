@@ -295,6 +295,32 @@ class SequenceRunner:
                 pass
         return data_pct if has_data else root_pct
 
+    @staticmethod
+    def _safe_delete(p: Path) -> int:
+        """Delete a file, truncating first to free blocks held by open fds.
+
+        On Linux, unlink() only removes the directory entry.  If another
+        process still holds the file open, the disk blocks remain allocated
+        until the last fd is closed.  By truncating to 0 bytes *before*
+        unlinking we release the blocks immediately regardless of open fds.
+
+        Returns the original file size (bytes freed).
+        """
+        try:
+            sz = p.stat().st_size
+        except OSError:
+            return 0
+        try:
+            with p.open("r+b") as fh:
+                fh.truncate(0)
+        except OSError:
+            pass
+        try:
+            p.unlink()
+        except OSError:
+            pass
+        return sz
+
     def _delete_old_captures(self, keep_minutes: int = 30) -> int:
         """Delete capture images older than keep_minutes. Returns bytes freed.
 
@@ -314,8 +340,7 @@ class SequenceRunner:
                 try:
                     st = f.stat()
                     if st.st_mtime < cutoff:
-                        freed += st.st_size
-                        f.unlink()
+                        freed += self._safe_delete(f)
                 except Exception:
                     pass
         return freed
@@ -334,18 +359,10 @@ class SequenceRunner:
                     continue
                 # HTML log viewers can be regenerated from JSON data
                 if f.suffix == ".html":
-                    try:
-                        freed += f.stat().st_size
-                        f.unlink()
-                    except Exception:
-                        pass
+                    freed += self._safe_delete(f)
                 # Old compressed logs are already archived data
                 elif f.suffix == ".gz":
-                    try:
-                        freed += f.stat().st_size
-                        f.unlink()
-                    except Exception:
-                        pass
+                    freed += self._safe_delete(f)
         return freed
 
     def _delete_all_captures(self) -> int:
@@ -363,11 +380,7 @@ class SequenceRunner:
                     continue
                 if f.suffix.lower() not in (".png", ".jpg", ".jpeg"):
                     continue
-                try:
-                    freed += f.stat().st_size
-                    f.unlink()
-                except Exception:
-                    pass
+                freed += self._safe_delete(f)
         # Also clean temp/cache
         for tmp_dir in [Path("/img/cache"), Path("/img/temp")]:
             if not tmp_dir.exists():
@@ -375,11 +388,7 @@ class SequenceRunner:
             for f in list(tmp_dir.iterdir()):
                 if not f.is_file():
                     continue
-                try:
-                    freed += f.stat().st_size
-                    f.unlink()
-                except Exception:
-                    pass
+                freed += self._safe_delete(f)
         return freed
 
     def _delete_old_station_logs(self, keep_minutes: int = 30) -> int:
@@ -403,8 +412,7 @@ class SequenceRunner:
                 try:
                     st = f.stat()
                     if st.st_mtime < cutoff:
-                        freed += st.st_size
-                        f.unlink()
+                        freed += self._safe_delete(f)
                 except Exception:
                     pass
         return freed
