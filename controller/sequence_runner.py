@@ -382,6 +382,33 @@ class SequenceRunner:
                     pass
         return freed
 
+    def _delete_old_station_logs(self, keep_minutes: int = 30) -> int:
+        """Delete station data logs older than keep_minutes. Returns bytes freed.
+
+        This is a last-resort cleanup step — station data (extract JSONL,
+        playback JSON/HTML) is normally preserved, but when disk is critically
+        full and all captures are already gone, these are the only files left
+        to free space.
+        """
+        freed = 0
+        cutoff = time.time() - (keep_minutes * 60)
+        for log_dir in [Path("/work/logs"), Path("/img/logs")]:
+            if not log_dir.exists():
+                continue
+            for f in list(log_dir.iterdir()):
+                if not f.is_file():
+                    continue
+                if not self._is_station_data_file(f.name):
+                    continue
+                try:
+                    st = f.stat()
+                    if st.st_mtime < cutoff:
+                        freed += st.st_size
+                        f.unlink()
+                except Exception:
+                    pass
+        return freed
+
     def _cleanup_old_archives(self, keep_days: int = 7) -> int:
         """Delete archived captures older than keep_days. Returns bytes freed."""
         overflow = self._get_overflow_root()
@@ -484,6 +511,13 @@ class SequenceRunner:
             if em_freed > 0:
                 freed += em_freed
                 actions.append(f"emergency delete all ({em_freed / (1024*1024):.1f} MB)")
+
+        # Step 8: Delete old station data logs if captures are gone but disk still critical
+        if self._disk_usage_pct() >= 95:
+            log_freed = self._delete_old_station_logs(keep_minutes=30)
+            if log_freed > 0:
+                freed += log_freed
+                actions.append(f"deleted old station logs ({log_freed / (1024*1024):.1f} MB)")
 
         if freed > 0:
             new_usage = self._disk_usage_pct()

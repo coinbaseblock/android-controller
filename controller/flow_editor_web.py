@@ -7420,7 +7420,7 @@ class EditorHandler(BaseHTTPRequestHandler):
             for p in log_dir.iterdir():
                 if p.is_file():
                     if self._is_station_data_file(p):
-                        # Move to overflow instead of skipping
+                        # Move to overflow if available, otherwise delete
                         if overflow_logs:
                             try:
                                 sz = p.stat().st_size
@@ -7429,6 +7429,15 @@ class EditorHandler(BaseHTTPRequestHandler):
                                 log_moved += 1
                             except Exception as e:
                                 errors.append(f"move {p.name}: {e}")
+                            continue
+                        # No overflow — Deep Clean is destructive by design, delete it
+                        try:
+                            freed += p.stat().st_size
+                            p.unlink()
+                            deleted += 1
+                            log_del += 1
+                        except Exception as e:
+                            errors.append(f"log {p.name}: {e}")
                         continue
                     try:
                         freed += p.stat().st_size
@@ -7551,8 +7560,18 @@ class EditorHandler(BaseHTTPRequestHandler):
 
         Unlike deep_clean which deletes everything, smart_clean preserves
         recently-created captures, sent images, and logs.
+
+        When disk is critically full (>=98%), keep_hours is automatically
+        reduced to 1 hour so that recent files can also be cleaned.
         """
         import time
+
+        # Auto-reduce keep_hours when disk is critically full
+        disk_pct = self._max_disk_pct()
+        if disk_pct >= 98 and keep_hours > 1:
+            keep_hours = 1
+        elif disk_pct >= 95 and keep_hours > 2:
+            keep_hours = 2
 
         cutoff = time.time() - (keep_hours * 3600)
         deleted = 0
@@ -7586,7 +7605,7 @@ class EditorHandler(BaseHTTPRequestHandler):
         details["captures"] = _clean_old_files(Path("/img/captures"), "capture")
         details["sent"] = _clean_old_files(Path("/img/sent"), "sent")
 
-        # Station/extract data files: move to overflow if available, else skip
+        # Station/extract data files: move to overflow if available, else delete old ones when critical
         overflow = self._get_overflow_path()
         overflow_logs = None
         if overflow and self._is_cross_filesystem_move(Path("/img"), overflow):
@@ -7602,16 +7621,29 @@ class EditorHandler(BaseHTTPRequestHandler):
                 if not p.is_file():
                     continue
                 if self._is_station_data_file(p):
-                    # Move old station data to overflow instead of skipping
+                    try:
+                        st = p.stat()
+                        if st.st_mtime >= cutoff:
+                            continue
+                    except Exception:
+                        continue
+                    # Move old station data to overflow if available
                     if overflow_logs:
                         try:
-                            st = p.stat()
-                            if st.st_mtime < cutoff:
-                                freed += st.st_size
-                                shutil.move(str(p), str(overflow_logs / p.name))
-                                log_moved += 1
+                            freed += st.st_size
+                            shutil.move(str(p), str(overflow_logs / p.name))
+                            log_moved += 1
                         except Exception as e:
                             errors.append(f"move {p.name}: {e}")
+                    elif disk_pct >= 95:
+                        # No overflow and disk critical — delete old station data
+                        try:
+                            freed += st.st_size
+                            p.unlink()
+                            deleted += 1
+                            log_total += 1
+                        except Exception as e:
+                            errors.append(f"log {p.name}: {e}")
                     continue
                 try:
                     st = p.stat()
