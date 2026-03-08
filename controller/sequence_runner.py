@@ -611,6 +611,36 @@ class SequenceRunner:
         # We only move/compress here so station data remains complete until
         # all 11 stations of the loop finish.
 
+        # Step 5: Move captures to tmpfs (/tmp) if disk still high — tmpfs
+        # doesn't consume Docker overlay space on Docker Desktop WSL2.
+        if self._disk_usage_pct() >= 85:
+            tmpfs_dir = Path("/tmp/captures")
+            try:
+                tmpfs_dir.mkdir(parents=True, exist_ok=True)
+                tmp_freed = 0
+                tmp_moved = 0
+                for cap_dir in [Path("/img/captures"), Path("/img/sent")]:
+                    if not cap_dir.exists():
+                        continue
+                    for f in list(cap_dir.iterdir()):
+                        if f.is_file() and f.suffix.lower() in (".png", ".jpg", ".jpeg"):
+                            try:
+                                sz = f.stat().st_size
+                                shutil.move(str(f), str(tmpfs_dir / f.name))
+                                tmp_freed += sz
+                                tmp_moved += 1
+                            except Exception:
+                                pass
+                if tmp_freed > 0:
+                    freed += tmp_freed
+                    actions.append(f"moved {tmp_moved} to tmpfs ({tmp_freed / (1024*1024):.1f} MB)")
+            except Exception:
+                pass
+
+        # NOTE: Station data logs (*-extract.jsonl, *-playback.json) are NEVER
+        # deleted during between-script cleanup.  These are critical for
+        # charger-view and must survive across all 11 stations in a loop.
+
         if freed > 0:
             new_usage = self._disk_usage_pct()
             self.log(
