@@ -538,6 +538,20 @@ class UniversalPlayer:
         self.log(f"  Key: {name}", "STEP")
         send_key_event(self.serial, frame.keycode)
 
+    @staticmethod
+    def _convert_png_to_jpeg(png_path: Path) -> Path:
+        """Convert a PNG screenshot to JPEG and delete the PNG. Returns the JPEG path."""
+        try:
+            from PIL import Image
+            jpg_path = png_path.with_suffix(".jpg")
+            img = Image.open(png_path)
+            img = img.convert("RGB")
+            img.save(jpg_path, "JPEG", quality=80, optimize=True)
+            png_path.unlink()
+            return jpg_path
+        except Exception:
+            return png_path  # Keep PNG if conversion fails
+
     def _exec_screenshot(self, frame: Frame, idx: int, loop_idx: int) -> None:
         ts = datetime.now().strftime("%Y%m%d-%H%M%S")
         stage = frame.stage or f"frame{idx}"
@@ -547,6 +561,8 @@ class UniversalPlayer:
 
         self.log(f"  Screenshot: {out_path}", "STEP")
         take_screenshot(self.serial, out_path)
+        # Convert PNG→JPEG immediately to save disk space
+        out_path = self._convert_png_to_jpeg(out_path)
         self.state.last_screenshot = str(out_path)
 
         if frame.send:
@@ -679,12 +695,14 @@ class UniversalPlayer:
             out_path = out_dir / filename
             try:
                 take_screenshot(self.serial, out_path)
+                out_path = self._convert_png_to_jpeg(out_path)
                 result["screenshot"] = str(out_path)
             except OSError as e:
                 if e.errno == 28:  # ENOSPC - No space left on device
                     self._free_disk_space(out_dir)
                     try:
                         take_screenshot(self.serial, out_path)
+                        out_path = self._convert_png_to_jpeg(out_path)
                         result["screenshot"] = str(out_path)
                     except Exception:
                         result["screenshot"] = None
@@ -976,6 +994,7 @@ class UniversalPlayer:
             out_dir = Path(self.recording.settings.screenshot_dir)
             path = out_dir / f"error-loop{loop_idx:04d}-frame{idx:03d}-{ts}.png"
             take_screenshot(self.serial, path)
+            path = self._convert_png_to_jpeg(path)
             self.state.last_error_screenshot = str(path)
         except Exception:
             pass
