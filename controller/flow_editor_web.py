@@ -6853,7 +6853,8 @@ class EditorHandler(BaseHTTPRequestHandler):
 
                             ts = entry.get("timestamp", "")
                             label = entry.get("label", "")
-                            dedup_key = f"{ts}_{label}"
+                            file_loop_raw = entry.get("loop", 1)
+                            dedup_key = f"{ts}_{label}_{file_loop_raw}"
                             if dedup_key in seen_entries:
                                 continue
                             seen_entries.add(dedup_key)
