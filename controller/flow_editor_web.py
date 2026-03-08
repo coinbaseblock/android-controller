@@ -3098,8 +3098,8 @@ async function refreshDiskSpace() {
     // data.used_pct = user data percentage; data.fs_used_pct = real filesystem pct
     const pct = data.used_pct;
     const fsPct = data.fs_used_pct || 0;
-    // Use real filesystem pct for auto-clean triggering
-    _lastDiskPct = fsPct;
+    // Use real filesystem pct for auto-clean triggering (skip if stats unreliable)
+    _lastDiskPct = data.fs_unreliable ? 0 : fsPct;
     const color = pct > 90 ? 'var(--red)' : pct > 75 ? '#d29922' : 'var(--green)';
     bar.style.width = pct + '%';
     bar.style.background = color;
@@ -3117,7 +3117,15 @@ async function refreshDiskSpace() {
       'Free: <strong>' + freeStr + '</strong>' +
       (data.log_count > 0 ? ' | Logs: <strong>' + data.log_size_mb + ' MB</strong> (' + data.log_count + ' files)' : '');
     // Warning banner based on real filesystem usage (not data pct)
-    if (fsPct > 95 && data.free_gb < 0.01) {
+    if (data.fs_unreliable) {
+      // Docker Desktop (WSL2) reports unreliable disk stats for bind mounts.
+      // The disk is NOT genuinely full – suppress false CRITICAL.
+      warn.innerHTML = '\u2139 Disk stats may be inaccurate (Docker Desktop). Actual space is available.';
+      warn.style.display = '';
+      warn.style.color = '#58a6ff';
+      warn.style.background = '#58a6ff20';
+      warn.style.borderColor = '#58a6ff40';
+    } else if (fsPct > 95 && data.free_gb < 0.01) {
       warn.innerHTML = '\u26a0 <strong>CRITICAL</strong>: Disk almost full (free: ' + freeStr + '). Use <strong>Clear Workspace</strong>, Smart Clean or Deep Clean now!';
       warn.style.display = '';
       warn.style.color = '#f85149';
@@ -7326,6 +7334,40 @@ class EditorHandler(BaseHTTPRequestHandler):
             fs_used = primary.used
             free = primary.free
 
+            # -- Docker Desktop false-full detection -------------------------
+            # In Docker Desktop (WSL2 backend on Windows), shutil.disk_usage()
+            # on bind-mounted paths can return the Docker VM's overlay stats
+            # instead of the actual host drive stats, falsely reporting 0 free.
+            # Detect this by attempting a small write: if it succeeds the disk
+            # is NOT genuinely full and we should find a better reading.
+            _fs_unreliable = False
+            if free == 0:
+                _probe = Path(self.work_dir) / ".disk_probe"
+                try:
+                    _probe.write_bytes(b"probe")
+                    _probe.unlink(missing_ok=True)
+                    # Write succeeded – filesystem is NOT really full.
+                    _fs_unreliable = True
+                    # Try alternate mounts for a better free-space reading.
+                    for alt_mount in ["/img", "/overflow"]:
+                        try:
+                            alt = shutil.disk_usage(alt_mount)
+                            if alt.free > free:
+                                free = alt.free
+                                fs_total = alt.total
+                                fs_used = alt.used
+                                _primary_mount = alt_mount
+                                break
+                        except OSError:
+                            pass
+                    # If still 0, set a nominal floor so the UI does not
+                    # show a false CRITICAL warning.
+                    if free == 0:
+                        free = 500 * 1024 * 1024          # 500 MB nominal
+                        fs_total = fs_used + free
+                except OSError:
+                    pass  # Disk is genuinely full
+
             img_dir = Path("/img")
 
             log_dir = Path(self.work_dir) / "logs"
@@ -7465,6 +7507,7 @@ class EditorHandler(BaseHTTPRequestHandler):
                     "jpg_count": jpg_count,
                 },
                 "overflow": overflow_info,
+                "fs_unreliable": _fs_unreliable,
             }
         except Exception as e:
             return {"ok": False, "error": str(e)}
