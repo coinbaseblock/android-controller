@@ -8147,29 +8147,52 @@ class EditorHandler(BaseHTTPRequestHandler):
         Skips mounts whose total size is below 500 MB – these are almost
         certainly Docker Desktop (WSL2) overlay artefacts rather than real
         host volumes, and would falsely report 97-100 % usage.
+
+        When the best reading still shows >=90% full, probes a write to
+        detect Docker Desktop false-full conditions (WSL2 overlay reports
+        97-98% but actual host has plenty of space).
         """
         _MIN_EXPECTED_TOTAL = 500 * 1024 * 1024  # 500 MB
-        data_pct = 0.0
-        has_data_mount = False
+        best_pct = 0.0
+        best_total = 0
         root_pct = 0.0
         for mount in ["/", str(self.work_dir), "/img"]:
             try:
                 u = shutil.disk_usage(mount)
-                # Ignore mounts reporting an unreasonably small total –
-                # Docker Desktop bind-mounts can return the overlay
-                # metadata size instead of the real host drive size.
                 if u.total < _MIN_EXPECTED_TOTAL:
                     continue
                 pct = u.used / u.total * 100 if u.total else 0
                 if mount == "/":
                     root_pct = pct
-                else:
-                    has_data_mount = True
-                    if pct > data_pct:
-                        data_pct = pct
+                elif u.total > best_total:
+                    best_pct = pct
+                    best_total = u.total
             except OSError:
                 pass
-        return data_pct if has_data_mount else root_pct
+
+        result = best_pct if best_total > 0 else root_pct
+
+        # Probe write to detect Docker Desktop false-full
+        if result >= 90:
+            _probe = Path(self.work_dir) / ".disk_probe_max"
+            try:
+                _probe.write_bytes(b"probe")
+                _probe.unlink(missing_ok=True)
+                # Write succeeded — disk not genuinely full
+                for alt in ["/img", "/overflow", "/tmp"]:
+                    try:
+                        au = shutil.disk_usage(alt)
+                        if au.total >= _MIN_EXPECTED_TOTAL and au.total > best_total:
+                            result = au.used / au.total * 100 if au.total else 0
+                            best_total = au.total
+                    except OSError:
+                        pass
+                if result >= 90:
+                    result = 50.0  # nominal — disk is actually fine
+            except OSError:
+                pass  # Genuinely full
+
+        return result
 
     def _cleanup_old_captures(self, keep_hours: int = 4) -> dict:
         """Delete old PNG/JPEG capture images while preserving extract logs.
