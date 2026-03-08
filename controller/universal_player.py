@@ -236,6 +236,9 @@ class UniversalPlayer:
         finally:
             self._running = False
             self.state.status = "idle"
+            # Flush any buffered extract entries that couldn't be written
+            # during playback due to disk-full conditions.
+            self.flush_pending_extracts()
             if self._debug_server:
                 self._debug_server.stop()
             self.log("Player stopped.")
@@ -694,27 +697,58 @@ class UniversalPlayer:
         # Use ONE log file per recording (per station), not per extract label.
         # e.g. station-01.urf.json -> station-01-extract.jsonl
         # All Ctrl captures within that station append to the same file.
-        log_dir = Path(self.recording.settings.screenshot_dir).parent / "logs"
-        log_dir.mkdir(parents=True, exist_ok=True)
         if self.recording_path:
             stem = Path(self.recording_path).stem.replace(".urf", "")
-            log_file = log_dir / f"{stem}-extract.jsonl"
+            log_filename = f"{stem}-extract.jsonl"
         else:
-            log_file = log_dir / f"extract-{label}.jsonl"
-        try:
-            with open(log_file, "a", encoding="utf-8") as f:
-                f.write(json.dumps(result, ensure_ascii=False) + "\n")
-        except OSError as e:
-            if e.errno == 28:  # ENOSPC
-                captures_dir = Path(self.recording.settings.screenshot_dir)
-                self._free_disk_space(captures_dir)
-                try:
-                    with open(log_file, "a", encoding="utf-8") as f:
-                        f.write(json.dumps(result, ensure_ascii=False) + "\n")
-                except OSError:
-                    self.log(f"  WARNING: Could not write extract log (disk full)", "WARN")
-            else:
-                raise
+            log_filename = f"extract-{label}.jsonl"
+
+        json_line = json.dumps(result, ensure_ascii=False) + "\n"
+        written = False
+        log_file = None
+
+        # Try multiple directories: primary, /img/logs, overflow
+        candidate_dirs = [
+            Path(self.recording.settings.screenshot_dir).parent / "logs",
+            Path("/img/logs"),
+        ]
+        overflow = self._get_overflow_root()
+        if overflow:
+            candidate_dirs.append(overflow / "logs")
+        # Also try /work/logs as fallback
+        work_logs = Path("/work/logs")
+        if work_logs not in candidate_dirs:
+            candidate_dirs.append(work_logs)
+
+        for log_dir in candidate_dirs:
+            log_file = log_dir / log_filename
+            try:
+                log_dir.mkdir(parents=True, exist_ok=True)
+                with open(log_file, "a", encoding="utf-8") as f:
+                    f.write(json_line)
+                written = True
+                break
+            except OSError as e:
+                if e.errno == 28:  # ENOSPC
+                    # Try freeing space and retry this dir once
+                    captures_dir = Path(self.recording.settings.screenshot_dir)
+                    self._free_disk_space(captures_dir)
+                    try:
+                        with open(log_file, "a", encoding="utf-8") as f:
+                            f.write(json_line)
+                        written = True
+                        break
+                    except OSError:
+                        continue  # try next directory
+                else:
+                    continue  # try next directory
+
+        if not written:
+            # Last resort: buffer in memory so data is not lost
+            if not hasattr(self, "_pending_extracts"):
+                self._pending_extracts: list = []
+            self._pending_extracts.append((log_filename, json_line))
+            self.log(f"  WARNING: Could not write extract log (disk full) — buffered in memory ({len(self._pending_extracts)} pending)", "WARN")
 
         field_count = len(result.get("fields", {}))
         text_count = len(result.get("all_text", []))
@@ -841,6 +875,52 @@ class UniversalPlayer:
         except OSError:
             pass
         return freed
+
+    def flush_pending_extracts(self) -> int:
+        """Flush in-memory buffered extract entries to disk.
+
+        Called after disk space has been freed (e.g. between scripts or after
+        a loop) to persist any extract data that couldn't be written earlier.
+        Returns the number of entries successfully flushed.
+        """
+        if not hasattr(self, "_pending_extracts") or not self._pending_extracts:
+            return 0
+
+        candidate_dirs = [
+            Path(self.recording.settings.screenshot_dir).parent / "logs",
+            Path("/img/logs"),
+        ]
+        overflow = self._get_overflow_root()
+        if overflow:
+            candidate_dirs.append(overflow / "logs")
+        work_logs = Path("/work/logs")
+        if work_logs not in candidate_dirs:
+            candidate_dirs.append(work_logs)
+
+        flushed = 0
+        remaining = []
+        for log_filename, json_line in self._pending_extracts:
+            written = False
+            for log_dir in candidate_dirs:
+                log_file = log_dir / log_filename
+                try:
+                    log_dir.mkdir(parents=True, exist_ok=True)
+                    with open(log_file, "a", encoding="utf-8") as f:
+                        f.write(json_line)
+                    written = True
+                    flushed += 1
+                    break
+                except OSError:
+                    continue
+            if not written:
+                remaining.append((log_filename, json_line))
+
+        self._pending_extracts = remaining
+        if flushed > 0:
+            self.log(f"  Flushed {flushed} buffered extract entries to disk", "OK")
+        if remaining:
+            self.log(f"  WARNING: {len(remaining)} extract entries still pending (disk full)", "WARN")
+        return flushed
 
     def _describe_frame(self, frame: Frame) -> str:
         if frame.type == "touch":
