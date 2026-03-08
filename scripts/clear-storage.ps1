@@ -57,13 +57,15 @@ function Get-DirSizeBytes {
 
 function Remove-FilesSafe {
     param(
-        [Parameter(Mandatory = $true)][System.Collections.Generic.List[System.IO.FileInfo]]$Files,
+        [Parameter(Mandatory = $false)]
+        [AllowNull()]
+        [System.Collections.Generic.List[System.IO.FileInfo]]$Files,
         [Parameter(Mandatory = $true)][string]$Reason,
         [switch]$ReportOnly,
         [switch]$Force
     )
 
-    if ($Files.Count -eq 0) {
+    if ($null -eq $Files -or $Files.Count -eq 0) {
         Write-Host "[info] No files matched for: $Reason" -ForegroundColor Yellow
         return [int64]0
     }
