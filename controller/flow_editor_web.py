@@ -5608,7 +5608,7 @@ td.status-cell{text-align:center}
 <div class="controls">
   <button onclick="loadData()">↺ Refresh</button>
   <label class="auto-refresh">
-    <input type="checkbox" id="autoRefresh" onchange="toggleAutoRefresh()">
+    <input type="checkbox" id="autoRefresh" checked onchange="toggleAutoRefresh()">
     Auto-refresh (30s)
   </label>
   <span id="lastUpdate" style="font-size:12px;color:#8b949e"></span>
@@ -5688,7 +5688,6 @@ function render(data) {
   if (!stations.length) {
     summaryEl.innerHTML = '';
     mainEl.innerHTML = '<div class="empty-state"><div class="icon">📭</div><p>No charger data found in extract logs.</p><p style="font-size:12px;margin-top:8px;color:#6e7681">Run a recording that captures charger detail pages (ctrl_capture_4 through ctrl_capture_7).</p><div id="diskWarnCharger"></div></div>';
-    // Check disk space asynchronously and show warning if full
     fetch('/api/disk-space').then(r => r.json()).then(disk => {
       if (disk.ok && disk.free_mb < 1) {
         const el = document.getElementById('diskWarnCharger');
@@ -5698,46 +5697,80 @@ function render(data) {
     return;
   }
 
-  // Show only COMPLETE rounds on this page (all stations must have the round).
-  // This prevents partial data (e.g. 7/11 stations) from being rendered.
-  if (complete === 0) {
-    summaryEl.innerHTML = `
-      <div class="summary-grid">
-        <div class="summary-card"><div class="num">${stations.length}</div><div class="label">Station(s)</div></div>
-        <div class="summary-card"><div class="num">0</div><div class="label">Complete Round(s)</div></div>
-        <div class="summary-card"><div class="num">${total}</div><div class="label">In-progress Round(s)</div></div>
-      </div>`;
-    mainEl.innerHTML = '<div class="empty-state"><div class="icon">⏳</div><p>กำลังรอข้อมูลให้ครบทุกสถานี (11/11) ก่อนแสดงผล</p><p style="font-size:12px;margin-top:8px;color:#6e7681">ระบบจะอัปเดตอัตโนมัติและแสดงรอบใหม่ทันทีเมื่อครบทุกรอบ</p></div>';
-    return;
+  // ---- Determine "complete rounds" = loops where ALL stations have data ----
+  const { complete, total } = getCompleteRoundCount(data);
+
+  // Collect all loop numbers that are complete (every station has it)
+  const stationLoopSets = stations.map(s => {
+    const loops = new Set();
+    (s.rounds || []).forEach(r => loops.add(r.loop));
+    return loops;
+  });
+  const completeLoops = new Set();
+  for (let l = 1; l <= total; l++) {
+    if (stationLoopSets.every(loops => loops.has(l))) {
+      completeLoops.add(l);
+    }
   }
 
-  // Summary – count unique loops and max connectors across complete rounds
-  let totalConnectors = 0, totalRounds = 0;
+  // Progress info for incomplete rounds being collected
+  let inProgressLoop = 0;
+  let inProgressCount = 0;
+  if (total > complete) {
+    const nextLoop = complete + 1;
+    inProgressCount = stationLoopSets.filter(loops => loops.has(nextLoop)).length;
+    inProgressLoop = nextLoop;
+  }
+
+  // Summary
+  let totalConnectors = 0;
   stations.forEach(s => {
-    const completeRounds = (s.rounds || []).filter(r => r.loop >= 1 && r.loop <= complete);
-    totalRounds += completeRounds.length;
-    completeRounds.forEach(r => {
+    s.rounds.forEach(r => {
       totalConnectors = Math.max(totalConnectors, r.connectors.length);
     });
   });
 
+  const progressHtml = inProgressLoop > 0
+    ? `<div class="summary-card"><div class="num" style="color:#d29922">${inProgressCount}/${stations.length}</div><div class="label">รอบ ${inProgressLoop} กำลังเก็บ…</div></div>`
+    : '';
+
   summaryEl.innerHTML = `
     <div class="summary-grid">
       <div class="summary-card"><div class="num">${stations.length}</div><div class="label">Station(s)</div></div>
-      <div class="summary-card"><div class="num">${totalRounds}</div><div class="label">Complete Capture Loop(s)</div></div>
+      <div class="summary-card"><div class="num" style="color:#3fb950">${completeLoops.size}</div><div class="label">Complete Round(s)</div></div>
       <div class="summary-card"><div class="num">${totalConnectors}</div><div class="label">Max Connectors</div></div>
+      ${progressHtml}
     </div>`;
 
-  // Build station cards
+  // If no complete rounds yet, show waiting message
+  if (completeLoops.size === 0) {
+    mainEl.innerHTML = '<div class="empty-state"><div class="icon">⏳</div><p>รอให้ครบ ' + stations.length + ' สถานี ก่อนแสดงผล…</p><p style="font-size:12px;margin-top:8px;color:#6e7681">เก็บแล้ว ' + inProgressCount + '/' + stations.length + ' สถานี (รอบ ' + inProgressLoop + ')</p></div>';
+    return;
+  }
+
+  // Build station cards — only show COMPLETE rounds
   let html = '';
   for (const station of stations) {
     const rounds = (station.rounds || []).filter(r => r.loop >= 1 && r.loop <= complete);
     if (!rounds.length) continue;
 
-    // Collect all unique charger+connector keys in order
+    // Filter to complete rounds only
+    const completeRounds = rounds.filter(r => completeLoops.has(r.loop));
+    if (!completeRounds.length) continue;
+
+    // Deduplicate by loop
+    const seenLoop = new Set();
+    const uniqueRounds = completeRounds.filter(r => {
+      const key = r.loop || r.timestamp;
+      if (seenLoop.has(key)) return false;
+      seenLoop.add(key);
+      return true;
+    });
+
+    // Collect all unique charger+connector keys from complete rounds
     const connectorKeys = [];
-    const connectorMap = {}; // key -> {charger_id, connector, type, max_power, rate}
-    for (const round of rounds) {
+    const connectorMap = {};
+    for (const round of uniqueRounds) {
       for (const c of round.connectors) {
         const k = `${c.charger_id}::${c.connector}`;
         if (!connectorMap[k]) {
@@ -5755,17 +5788,7 @@ function render(data) {
       chargerGroups[cid].push(k);
     }
 
-    // Rounds are already grouped by loop on the server side.
-    // Deduplicate by loop number (safety net for edge cases).
-    const seenLoop = new Set();
-    const uniqueRounds = rounds.filter(r => {
-      const key = r.loop || r.timestamp;
-      if (seenLoop.has(key)) return false;
-      seenLoop.add(key);
-      return true;
-    });
-
-    // Round columns – use the actual loop number from data
+    // Round columns
     const roundCols = uniqueRounds.map((r, i) => `
       <th class="round-col">
         <div class="round-header">รอบ ${r.loop || (i+1)}</div>
@@ -6010,6 +6033,8 @@ function exportHTML() {
 document.getElementById('autoRefresh').checked = true;
 toggleAutoRefresh();
 loadData();
+// Auto-refresh is ON by default — start the timer immediately
+toggleAutoRefresh();
 </script>
 </body>
 </html>"""
@@ -6753,6 +6778,12 @@ class EditorHandler(BaseHTTPRequestHandler):
         caller should try these in order and fallback on ENOSPC.
         """
         dirs: list[Path] = [Path(self.work_dir) / "logs", Path("/img/logs")]
+
+        # Include tmpfs logs — the player may write here when Docker overlay
+        # is full on Docker Desktop WSL2 (tmpfs is always writable).
+        tmpfs_logs = Path("/tmp/logs")
+        if tmpfs_logs.exists():
+            dirs.append(tmpfs_logs)
 
         overflow = self._get_overflow_path()
         if overflow:

@@ -556,11 +556,24 @@ class UniversalPlayer:
         ts = datetime.now().strftime("%Y%m%d-%H%M%S")
         stage = frame.stage or f"frame{idx}"
         filename = f"loop{loop_idx:04d}-{ts}-{stage}.png"
-        out_dir = Path(self.recording.settings.screenshot_dir)
+        # Prefer tmpfs to avoid Docker overlay pressure on Docker Desktop WSL2
+        tmpfs_dir = Path("/tmp/captures")
+        orig_dir = Path(self.recording.settings.screenshot_dir)
+        out_dir = tmpfs_dir if tmpfs_dir.parent.exists() else orig_dir
         out_path = out_dir / filename
 
         self.log(f"  Screenshot: {out_path}", "STEP")
-        take_screenshot(self.serial, out_path)
+        try:
+            out_dir.mkdir(parents=True, exist_ok=True)
+            take_screenshot(self.serial, out_path)
+        except OSError as e:
+            if e.errno == 28 and out_dir != orig_dir:
+                # tmpfs full — fall back to configured dir
+                out_path = orig_dir / filename
+                orig_dir.mkdir(parents=True, exist_ok=True)
+                take_screenshot(self.serial, out_path)
+            else:
+                raise
         # Convert PNG→JPEG immediately to save disk space
         out_path = self._convert_png_to_jpeg(out_path)
         self.state.last_screenshot = str(out_path)
@@ -688,24 +701,41 @@ class UniversalPlayer:
             result["all_text"] = all_texts
 
         # Take screenshot if requested
+        # Use tmpfs (/tmp) as primary screenshot dir to avoid filling Docker
+        # overlay on Docker Desktop WSL2.  Fall back to configured dir.
         if frame.extract_screenshot:
             ts = datetime.now().strftime("%Y%m%d-%H%M%S")
             filename = f"extract-loop{loop_idx:04d}-{ts}-{label}.png"
-            out_dir = Path(self.recording.settings.screenshot_dir)
+            tmpfs_dir = Path("/tmp/captures")
+            orig_dir = Path(self.recording.settings.screenshot_dir)
+            # Prefer tmpfs to avoid Docker overlay pressure
+            out_dir = tmpfs_dir if tmpfs_dir.parent.exists() else orig_dir
             out_path = out_dir / filename
             try:
+                out_dir.mkdir(parents=True, exist_ok=True)
                 take_screenshot(self.serial, out_path)
                 out_path = self._convert_png_to_jpeg(out_path)
                 result["screenshot"] = str(out_path)
             except OSError as e:
-                if e.errno == 28:  # ENOSPC - No space left on device
-                    self._free_disk_space(out_dir)
-                    try:
-                        take_screenshot(self.serial, out_path)
-                        out_path = self._convert_png_to_jpeg(out_path)
-                        result["screenshot"] = str(out_path)
-                    except Exception:
-                        result["screenshot"] = None
+                if e.errno == 28:  # ENOSPC
+                    # tmpfs full or unavailable — try configured dir
+                    if out_dir != orig_dir:
+                        out_path = orig_dir / filename
+                        try:
+                            orig_dir.mkdir(parents=True, exist_ok=True)
+                            take_screenshot(self.serial, out_path)
+                            out_path = self._convert_png_to_jpeg(out_path)
+                            result["screenshot"] = str(out_path)
+                        except Exception:
+                            result["screenshot"] = None
+                    else:
+                        self._free_disk_space(out_dir)
+                        try:
+                            take_screenshot(self.serial, out_path)
+                            out_path = self._convert_png_to_jpeg(out_path)
+                            result["screenshot"] = str(out_path)
+                        except Exception:
+                            result["screenshot"] = None
                 else:
                     result["screenshot"] = None
             except Exception:
@@ -725,10 +755,13 @@ class UniversalPlayer:
         written = False
         log_file = None
 
-        # Try multiple directories: primary, /img/logs, overflow
+        # Try multiple directories: primary, /img/logs, tmpfs, overflow, /work/logs
+        # tmpfs (/tmp/logs) is included early as it doesn't consume Docker overlay
+        # space on Docker Desktop WSL2 and is always writable.
         candidate_dirs = [
             Path(self.recording.settings.screenshot_dir).parent / "logs",
             Path("/img/logs"),
+            Path("/tmp/logs"),  # tmpfs — immune to Docker overlay pressure
         ]
         overflow = self._get_overflow_root()
         if overflow:
@@ -817,14 +850,64 @@ class UniversalPlayer:
             pass
         return sz
 
+    @staticmethod
+    def _is_docker_desktop_false_full(path: Path) -> bool:
+        """Detect Docker Desktop WSL2 false-full condition.
+
+        On Docker Desktop (WSL2 backend), shutil.disk_usage() on bind-mounted
+        paths can report the Docker overlay stats (97-98% full) instead of the
+        actual host drive stats.  We detect this by probing a write: if it
+        succeeds, the disk is NOT genuinely full.
+        """
+        probe = path / ".disk_probe_player"
+        try:
+            probe.parent.mkdir(parents=True, exist_ok=True)
+            probe.write_bytes(b"x" * 4096)  # 4 KB probe
+            probe.unlink(missing_ok=True)
+            return True  # Write succeeded — not genuinely full
+        except OSError:
+            return False  # Genuinely full
+
     def _free_disk_space(self, captures_dir: Path) -> int:
         """Emergency disk space recovery when ENOSPC occurs during extract.
 
-        Primary: move captures to overflow/HDD (preserves all data).
-        Fallback: delete oldest captures only if overflow unavailable.
+        Primary: move captures to tmpfs or overflow/HDD (preserves all data).
+        Fallback: delete oldest captures only if genuinely full and no alternatives.
         Returns bytes freed from local disk.
         """
         freed = 0
+
+        # Docker Desktop false-full detection: if we CAN write, the ENOSPC
+        # was likely transient or from the overlay layer, not the bind mount.
+        # Try tmpfs first before deleting anything.
+        if self._is_docker_desktop_false_full(captures_dir):
+            self.log("  Disk reports full but probe-write succeeded (Docker Desktop WSL2) — skipping destructive cleanup", "OK")
+            return 0
+
+        # Also check tmpfs — if tmpfs has space, move captures there
+        tmpfs_captures = Path("/tmp/captures")
+        if self._is_docker_desktop_false_full(Path("/tmp")):
+            try:
+                tmpfs_captures.mkdir(parents=True, exist_ok=True)
+                moved = 0
+                for d in [captures_dir, Path("/img/sent")]:
+                    if not d.exists():
+                        continue
+                    for f in list(d.iterdir()):
+                        if f.is_file() and f.suffix.lower() in (".png", ".jpg", ".jpeg"):
+                            try:
+                                sz = f.stat().st_size
+                                shutil.move(str(f), str(tmpfs_captures / f.name))
+                                freed += sz
+                                moved += 1
+                            except Exception:
+                                pass
+                if moved > 0:
+                    self.log(f"  Moved {moved} captures to tmpfs ({freed / (1024*1024):.1f} MB)", "OK")
+                    return freed
+            except Exception:
+                pass
+
         overflow = self._get_overflow_root()
 
         # Collect all capture images
@@ -855,25 +938,9 @@ class UniversalPlayer:
             if freed > 0:
                 self.log(f"  Moved {moved} captures to overflow ({freed / (1024*1024):.1f} MB)", "WARN")
 
-            # Check if move actually freed space (overflow may be on same fs)
-            try:
-                u = shutil.disk_usage(str(captures_dir))
-                still_full = (u.used / u.total * 100) >= 95 if u.total else True
-            except OSError:
-                still_full = True
-            if still_full:
-                # Docker Desktop/WSL2 may report overlay usage (~98%) even when
-                # host disk has free space. Verify with a tiny write probe before
-                # falling back to deletion.
-                try:
-                    probe = Path("/work/.disk_probe_player")
-                    probe.write_bytes(b"probe")
-                    probe.unlink(missing_ok=True)
-                    still_full = False
-                    self.log("  Disk reading appears to be overlay/unreliable — skip capture deletion", "WARN")
-                except OSError:
-                    pass
-
+            # Check if move actually freed space — use probe-write instead of
+            # unreliable shutil.disk_usage() (Docker Desktop WSL2 fix)
+            still_full = not self._is_docker_desktop_false_full(captures_dir)
             if still_full:
                 # Overflow didn't help — delete oldest captures as fallback
                 remaining = [(m, s, f) for m, s, f in candidates if f.exists()]
@@ -920,6 +987,7 @@ class UniversalPlayer:
         candidate_dirs = [
             Path(self.recording.settings.screenshot_dir).parent / "logs",
             Path("/img/logs"),
+            Path("/tmp/logs"),  # tmpfs — immune to Docker overlay pressure
         ]
         overflow = self._get_overflow_root()
         if overflow:
