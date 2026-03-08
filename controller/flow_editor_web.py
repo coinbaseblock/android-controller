@@ -7295,34 +7295,32 @@ class EditorHandler(BaseHTTPRequestHandler):
         when the disk is genuinely running out.
         """
         try:
-            # Gather usage for all relevant mount points
-            candidates = []
-            for mount in ["/", str(self.work_dir), "/img"]:
-                try:
-                    u = shutil.disk_usage(mount)
-                    candidates.append((mount, u))
-                except OSError:
-                    pass
+            # Use work_dir as the primary filesystem – it is where user
+            # recordings (.urf.json) live and is the most relevant mount
+            # for the "how much space do I have?" question.
+            # Previous heuristic picked the mount with *least* free space
+            # which could accidentally select the Docker overlay (/) when
+            # it coincidentally shared the same total size as a bind-mount,
+            # causing a false "disk full" on startup.
+            primary = None
+            _primary_mount = str(self.work_dir)
+            try:
+                primary = shutil.disk_usage(str(self.work_dir))
+            except OSError:
+                pass
 
-            if not candidates:
+            # Fallback: try /img, then /
+            if primary is None:
+                for mount in ["/img", "/"]:
+                    try:
+                        primary = shutil.disk_usage(mount)
+                        _primary_mount = mount
+                        break
+                    except OSError:
+                        pass
+
+            if primary is None:
                 return {"ok": False, "error": "Cannot read any filesystem"}
-
-            # De-duplicate partitions that report the same total (same fs)
-            seen_totals: dict[int, tuple] = {}
-            for mount, u in candidates:
-                key = u.total
-                if key not in seen_totals or u.free < seen_totals[key][1].free:
-                    seen_totals[key] = (mount, u)
-
-            unique_parts = list(seen_totals.values())
-
-            data_parts = [(m, u) for m, u in unique_parts if m != "/"]
-            if data_parts:
-                data_parts.sort(key=lambda x: x[1].free)
-                _primary_mount, primary = data_parts[0]
-            else:
-                unique_parts.sort(key=lambda x: x[1].free)
-                _primary_mount, primary = unique_parts[0]
 
             fs_total = primary.total
             fs_used = primary.used
