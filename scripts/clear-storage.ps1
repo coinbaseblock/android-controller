@@ -211,30 +211,31 @@ $afterFreeBytes = [int64]$afterDriveInfo.FreeSpace
 $belowTarget = ($afterFreeBytes -lt ($TargetFreeGB * 1GB))
 if ($belowTarget) {
     Write-Host "[warn] Free space is still below target after local cleanup: $(Format-Bytes $afterFreeBytes) < $TargetFreeGB GB" -ForegroundColor Yellow
+    if (-not $PruneDocker) {
+        Write-Host '[hint] Re-run with -PruneDocker to cleanup Docker cache when free space is low.' -ForegroundColor Yellow
+    }
+}
 
-    if ($PruneDocker) {
-        if ($ReportOnly) {
-            Invoke-DockerCleanup -Aggressive:$AggressiveDocker -ReportOnly
-        } else {
-            if ($PSCmdlet.ShouldProcess('Docker cache and unused artifacts', 'Prune Docker storage')) {
-                if (-not $Force) {
-                    $warn = if ($AggressiveDocker) {
-                        'Aggressive Docker prune can remove unused volumes. Continue?'
-                    } else {
-                        'Safe Docker prune will remove build cache and unused resources. Continue?'
-                    }
-                    if (-not $PSCmdlet.ShouldContinue($warn, 'Docker cleanup confirmation')) {
-                        Write-Host '[info] Docker cleanup skipped by user choice.' -ForegroundColor Yellow
-                    } else {
-                        Invoke-DockerCleanup -Aggressive:$AggressiveDocker
-                    }
+if ($PruneDocker) {
+    if ($ReportOnly) {
+        Invoke-DockerCleanup -Aggressive:$AggressiveDocker -ReportOnly
+    } else {
+        if ($PSCmdlet.ShouldProcess('Docker cache and unused artifacts', 'Prune Docker storage')) {
+            if (-not $Force) {
+                $warn = if ($AggressiveDocker) {
+                    'Aggressive Docker prune can remove unused volumes. Continue?'
+                } else {
+                    'Safe Docker prune will remove build cache and unused resources. Continue?'
+                }
+                if (-not $PSCmdlet.ShouldContinue($warn, 'Docker cleanup confirmation')) {
+                    Write-Host '[info] Docker cleanup skipped by user choice.' -ForegroundColor Yellow
                 } else {
                     Invoke-DockerCleanup -Aggressive:$AggressiveDocker
                 }
+            } else {
+                Invoke-DockerCleanup -Aggressive:$AggressiveDocker
             }
         }
-    } else {
-        Write-Host '[hint] Re-run with -PruneDocker to cleanup Docker cache when free space is low.' -ForegroundColor Yellow
     }
 }
 
