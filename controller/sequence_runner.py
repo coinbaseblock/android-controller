@@ -297,8 +297,8 @@ class SequenceRunner:
         return freed
 
     @staticmethod
-    def _disk_usage_pct() -> float:
-        """Return disk usage percentage, with Docker Desktop false-full detection.
+    def _disk_usage_info() -> Dict[str, Any]:
+        """Return disk usage info with Docker Desktop false-full detection.
 
         On Docker Desktop (WSL2 backend on Windows), shutil.disk_usage() on
         bind-mounted paths can return the Docker VM overlay stats instead of
@@ -310,6 +310,8 @@ class SequenceRunner:
 
         best_pct = 0.0
         best_total = 0
+        best_free = 0
+        best_mount = ""
 
         for mount in ["/work", "/img", "/"]:
             try:
@@ -317,8 +319,12 @@ class SequenceRunner:
                 if u.total >= _MIN_EXPECTED_TOTAL and u.total > best_total:
                     best_pct = u.used / u.total * 100 if u.total else 0
                     best_total = u.total
+                    best_free = u.free
+                    best_mount = mount
             except OSError:
                 pass
+
+        reliable = True
 
         # If the "best" reading still looks suspiciously full (>=90%), probe
         # whether we can actually write — Docker Desktop often lies.
@@ -327,6 +333,7 @@ class SequenceRunner:
             try:
                 probe.write_bytes(b"probe")
                 probe.unlink(missing_ok=True)
+                reliable = False
                 # Write succeeded — disk is NOT genuinely full.
                 # Try to find a mount with realistic stats.
                 for alt in ["/img", "/overflow", "/tmp"]:
@@ -337,6 +344,8 @@ class SequenceRunner:
                             if au.total > best_total:
                                 best_pct = alt_pct
                                 best_total = au.total
+                                best_free = au.free
+                                best_mount = alt
                     except OSError:
                         pass
                 # If still looks full after probing all mounts, report a safe
@@ -346,7 +355,42 @@ class SequenceRunner:
             except OSError:
                 pass  # Write failed — disk genuinely full, keep the reading
 
-        return best_pct
+        return {
+            "pct": best_pct,
+            "total": best_total,
+            "free": best_free,
+            "mount": best_mount,
+            "reliable": reliable,
+        }
+
+    @classmethod
+    def _disk_usage_pct(cls) -> float:
+        return float(cls._disk_usage_info().get("pct", 0.0))
+
+    def _log_storage_snapshot(self, phase: str) -> None:
+        """Log user-data footprint and filesystem reading for each script step."""
+        captures_size = sum(
+            f.stat().st_size
+            for d in [Path("/img/captures"), Path("/img/sent")]
+            if d.exists()
+            for f in d.iterdir()
+            if f.is_file() and f.suffix.lower() in (".png", ".jpg", ".jpeg")
+        )
+        logs_size = 0
+        for d in [Path("/img/logs"), Path("/work/logs")]:
+            if not d.exists():
+                continue
+            for f in d.iterdir():
+                if f.is_file():
+                    logs_size += f.stat().st_size
+
+        info = self._disk_usage_info()
+        self.log(
+            f"Storage [{phase}]: captures={captures_size/(1024*1024):.1f} MB, "
+            f"logs={logs_size/(1024*1024):.1f} MB, disk={info['pct']:.0f}%"
+            + (" (overlay reading)" if not info.get("reliable", True) else ""),
+            "INFO",
+        )
 
     @staticmethod
     def _safe_delete(p: Path) -> int:
@@ -563,34 +607,9 @@ class SequenceRunner:
                 freed += arc_freed
                 actions.append(f"archived loop {self.current_loop} ({arc_freed / (1024*1024):.1f} MB)")
 
-        # Step 5: Delete old captures if disk still high (even with overflow)
-        # Overflow may be on same filesystem or too small — must not rely on it alone
-        if self._disk_usage_pct() >= 90:
-            prev_freed = self._delete_old_captures(keep_minutes=2)
-            if prev_freed > 0:
-                freed += prev_freed
-                actions.append(f"deleted old captures ({prev_freed / (1024*1024):.1f} MB)")
-
-        # Step 6: Delete regenerable files (HTML viewers, old .gz) if still critical
-        if self._disk_usage_pct() >= 95:
-            regen_freed = self._delete_regenerable_files()
-            if regen_freed > 0:
-                freed += regen_freed
-                actions.append(f"deleted regenerable files ({regen_freed / (1024*1024):.1f} MB)")
-
-        # Step 7: Emergency — delete ALL captures if still critical
-        if self._disk_usage_pct() >= 95:
-            em_freed = self._delete_all_captures()
-            if em_freed > 0:
-                freed += em_freed
-                actions.append(f"emergency delete all ({em_freed / (1024*1024):.1f} MB)")
-
-        # Step 8: Delete old station data logs if captures are gone but disk still critical
-        if self._disk_usage_pct() >= 95:
-            log_freed = self._delete_old_station_logs(keep_minutes=30)
-            if log_freed > 0:
-                freed += log_freed
-                actions.append(f"deleted old station logs ({log_freed / (1024*1024):.1f} MB)")
+        # IMPORTANT: no destructive deletion between scripts.
+        # We only move/compress here so station data remains complete until
+        # all 11 stations of the loop finish.
 
         if freed > 0:
             new_usage = self._disk_usage_pct()
@@ -709,14 +728,23 @@ class SequenceRunner:
                     self.log(f"--- Script [{i+1}/{len(enabled_scripts)}]: {script_path.name} ---", "SEQ")
 
                     # Pre-flight disk check: clean proactively before script runs
-                    pre_usage = self._disk_usage_pct()
-                    if pre_usage >= 80:
+                    self._log_storage_snapshot(f"before {script_path.name}")
+
+                    pre_info = self._disk_usage_info()
+                    pre_usage = float(pre_info.get("pct", 0.0))
+                    if pre_usage >= 80 and pre_info.get("reliable", True):
                         self.log(f"Disk at {pre_usage:.0f}% before script — running cleanup...", "WARN")
                         self._cleanup_between_scripts()
+                    elif pre_usage >= 80:
+                        self.log(
+                            f"Disk reports {pre_usage:.0f}% before script but reading is overlay/unreliable — skip destructive pressure.",
+                            "WARN",
+                        )
 
                     # Post-cleanup check: skip script if disk is still critically full
-                    post_usage = self._disk_usage_pct()
-                    if post_usage >= 98:
+                    post_info = self._disk_usage_info()
+                    post_usage = float(post_info.get("pct", 0.0))
+                    if post_usage >= 98 and post_info.get("reliable", True):
                         self.log(
                             f"Disk still at {post_usage:.0f}% after cleanup — skipping {script_path.name} to avoid Errno 28. "
                             f"Use Deep Clean or expand storage.",
@@ -777,6 +805,7 @@ class SequenceRunner:
 
                     # Non-destructive cleanup between scripts (NEVER deletes current loop captures)
                     self._cleanup_between_scripts()
+                    self._log_storage_snapshot(f"after {script_path.name}")
 
                     # Delay between scripts
                     if self._running and i < len(enabled_scripts) - 1 and self.script_delay > 0:
