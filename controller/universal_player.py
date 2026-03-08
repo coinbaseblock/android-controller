@@ -862,6 +862,19 @@ class UniversalPlayer:
             except OSError:
                 still_full = True
             if still_full:
+                # Docker Desktop/WSL2 may report overlay usage (~98%) even when
+                # host disk has free space. Verify with a tiny write probe before
+                # falling back to deletion.
+                try:
+                    probe = Path("/work/.disk_probe_player")
+                    probe.write_bytes(b"probe")
+                    probe.unlink(missing_ok=True)
+                    still_full = False
+                    self.log("  Disk reading appears to be overlay/unreliable — skip capture deletion", "WARN")
+                except OSError:
+                    pass
+
+            if still_full:
                 # Overflow didn't help — delete oldest captures as fallback
                 remaining = [(m, s, f) for m, s, f in candidates if f.exists()]
                 delete_count = max(len(remaining) // 2, 1)

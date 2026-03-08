@@ -5681,6 +5681,7 @@ async function loadData() {
 
 function render(data) {
   const stations = data.stations || [];
+  const { complete, total } = getCompleteRoundCount(data);
   const summaryEl = document.getElementById('summaryArea');
   const mainEl = document.getElementById('mainArea');
 
@@ -5697,11 +5698,25 @@ function render(data) {
     return;
   }
 
-  // Summary – count unique loops and max connectors across all rounds
+  // Show only COMPLETE rounds on this page (all stations must have the round).
+  // This prevents partial data (e.g. 7/11 stations) from being rendered.
+  if (complete === 0) {
+    summaryEl.innerHTML = `
+      <div class="summary-grid">
+        <div class="summary-card"><div class="num">${stations.length}</div><div class="label">Station(s)</div></div>
+        <div class="summary-card"><div class="num">0</div><div class="label">Complete Round(s)</div></div>
+        <div class="summary-card"><div class="num">${total}</div><div class="label">In-progress Round(s)</div></div>
+      </div>`;
+    mainEl.innerHTML = '<div class="empty-state"><div class="icon">⏳</div><p>กำลังรอข้อมูลให้ครบทุกสถานี (11/11) ก่อนแสดงผล</p><p style="font-size:12px;margin-top:8px;color:#6e7681">ระบบจะอัปเดตอัตโนมัติและแสดงรอบใหม่ทันทีเมื่อครบทุกรอบ</p></div>';
+    return;
+  }
+
+  // Summary – count unique loops and max connectors across complete rounds
   let totalConnectors = 0, totalRounds = 0;
   stations.forEach(s => {
-    totalRounds += s.rounds.length;
-    s.rounds.forEach(r => {
+    const completeRounds = (s.rounds || []).filter(r => r.loop >= 1 && r.loop <= complete);
+    totalRounds += completeRounds.length;
+    completeRounds.forEach(r => {
       totalConnectors = Math.max(totalConnectors, r.connectors.length);
     });
   });
@@ -5709,14 +5724,14 @@ function render(data) {
   summaryEl.innerHTML = `
     <div class="summary-grid">
       <div class="summary-card"><div class="num">${stations.length}</div><div class="label">Station(s)</div></div>
-      <div class="summary-card"><div class="num">${totalRounds}</div><div class="label">Capture Loop(s)</div></div>
+      <div class="summary-card"><div class="num">${totalRounds}</div><div class="label">Complete Capture Loop(s)</div></div>
       <div class="summary-card"><div class="num">${totalConnectors}</div><div class="label">Max Connectors</div></div>
     </div>`;
 
   // Build station cards
   let html = '';
   for (const station of stations) {
-    const rounds = station.rounds;
+    const rounds = (station.rounds || []).filter(r => r.loop >= 1 && r.loop <= complete);
     if (!rounds.length) continue;
 
     // Collect all unique charger+connector keys in order
@@ -5992,6 +6007,8 @@ function exportHTML() {
   URL.revokeObjectURL(url);
 }
 
+document.getElementById('autoRefresh').checked = true;
+toggleAutoRefresh();
 loadData();
 </script>
 </body>
