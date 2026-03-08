@@ -1999,6 +1999,7 @@ function logHoverFrame(frameId) {
 // ============================================================
 let lastScopeKey = '';
 let lastScopeAt = 0;
+let lastScopeMsg = '';
 let activeScopeEl = null;
 
 function collectScopeText(scope, el) {
@@ -2087,6 +2088,9 @@ function initHoverScopes() {
       return;
     }
 
+    // Ignore transitions between children in the same scope (prevents spam while DOM updates)
+    if (e.relatedTarget && scopeEl.contains(e.relatedTarget)) return;
+
     // Highlight active scope
     if (activeScopeEl && activeScopeEl !== scopeEl) activeScopeEl.classList.remove('hover-active');
     scopeEl.classList.add('hover-active');
@@ -2096,11 +2100,15 @@ function initHoverScopes() {
     const now = Date.now();
     // Rate limit: don't re-send for same scope within 700ms
     if (scope === lastScopeKey && (now - lastScopeAt) < 700) return;
-    lastScopeKey = scope;
-    lastScopeAt = now;
 
     const message = collectScopeText(scope, scopeEl);
     if (!message) return;
+
+    // Avoid repeating identical scope+message too often (e.g. critical disk warning spam)
+    if (scope === lastScopeKey && message === lastScopeMsg && (now - lastScopeAt) < 8000) return;
+    lastScopeKey = scope;
+    lastScopeMsg = message;
+    lastScopeAt = now;
 
     api('POST', '/hover-log', {
       scope: scope,
