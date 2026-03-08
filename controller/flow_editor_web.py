@@ -27,6 +27,7 @@ Features:
 
 from __future__ import annotations
 
+import errno
 import io
 import json
 import os
@@ -6669,6 +6670,37 @@ class EditorHandler(BaseHTTPRequestHandler):
 
     # -------- Extract Data / Station Data endpoints --------
 
+    def _extract_log_write_dirs(self) -> list[Path]:
+        """Return candidate directories for writing extract logs.
+
+        Priority:
+          1) {work_dir}/logs (backward compatible default)
+          2) /img/logs (player-side location)
+          3) {overflow}/logs (when configured)
+
+        We don't assume all paths are writable in low-disk conditions, so the
+        caller should try these in order and fallback on ENOSPC.
+        """
+        dirs: list[Path] = [Path(self.work_dir) / "logs", Path("/img/logs")]
+
+        overflow = self._get_overflow_path()
+        if overflow:
+            dirs.append(overflow / "logs")
+
+        # De-duplicate by resolved path when possible.
+        unique: list[Path] = []
+        seen: set[str] = set()
+        for d in dirs:
+            try:
+                key = str(d.resolve())
+            except Exception:
+                key = str(d)
+            if key in seen:
+                continue
+            seen.add(key)
+            unique.append(d)
+        return unique
+
     def _save_extract_data(self, body: dict) -> dict:
         """Save captured UI data to a JSONL extract log file (append).
 
@@ -6686,9 +6718,6 @@ class EditorHandler(BaseHTTPRequestHandler):
         # Determine log file path: {work}/logs/{recording-stem}-extract.jsonl
         rec_path = Path(recording_path)
         stem = rec_path.stem.replace(".urf", "")
-        log_dir = Path(self.work_dir) / "logs"
-        log_dir.mkdir(parents=True, exist_ok=True)
-        log_file = log_dir / f"{stem}-extract.jsonl"
 
         entry = {
             "timestamp": timestamp or datetime.now().astimezone().isoformat(timespec="milliseconds"),
@@ -6698,12 +6727,25 @@ class EditorHandler(BaseHTTPRequestHandler):
             "elements": elements,
         }
 
-        try:
-            with open(log_file, "a", encoding="utf-8") as f:
-                f.write(json.dumps(entry, ensure_ascii=False) + "\n")
-            return {"ok": True, "path": str(log_file), "entries": self._count_lines(log_file)}
-        except Exception as e:
-            return {"ok": False, "error": str(e)}
+        last_error = ""
+        for log_dir in self._extract_log_write_dirs():
+            log_file = log_dir / f"{stem}-extract.jsonl"
+            try:
+                log_dir.mkdir(parents=True, exist_ok=True)
+                with open(log_file, "a", encoding="utf-8") as f:
+                    f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+                return {"ok": True, "path": str(log_file), "entries": self._count_lines(log_file)}
+            except OSError as e:
+                last_error = str(e)
+                # Try next location when current disk is full.
+                if e.errno == errno.ENOSPC:
+                    continue
+                break
+            except Exception as e:
+                last_error = str(e)
+                break
+
+        return {"ok": False, "error": last_error or "Unable to write extract log"}
 
     def _extract_log_dirs(self) -> list:
         """Return all directories that may contain extract log files.
@@ -6714,12 +6756,9 @@ class EditorHandler(BaseHTTPRequestHandler):
         the player are always visible in the UI.
         """
         dirs = []
-        work_log = Path(self.work_dir) / "logs"
-        if work_log.exists():
-            dirs.append(work_log)
-        img_log = Path("/img/logs")
-        if img_log.exists() and img_log.resolve() != work_log.resolve():
-            dirs.append(img_log)
+        for d in self._extract_log_write_dirs():
+            if d.exists():
+                dirs.append(d)
         return dirs
 
     def _charger_data(self) -> dict:
@@ -7071,7 +7110,12 @@ class EditorHandler(BaseHTTPRequestHandler):
         if not p.exists():
             return {"error": f"File not found: {path}"}
         # Safety check – allow both work_dir/logs and /img/logs
-        allowed_dirs = [Path(self.work_dir).resolve(), Path("/img/logs").resolve()]
+        allowed_dirs = []
+        for d in self._extract_log_write_dirs():
+            try:
+                allowed_dirs.append(d.resolve())
+            except Exception:
+                pass
         resolved = p.resolve()
         if not any(self._is_under(resolved, d) for d in allowed_dirs):
             return {"error": "Cannot read files outside allowed directories"}
