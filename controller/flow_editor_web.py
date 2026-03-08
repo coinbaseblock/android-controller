@@ -7338,11 +7338,16 @@ class EditorHandler(BaseHTTPRequestHandler):
             # -- Docker Desktop false-full detection -------------------------
             # In Docker Desktop (WSL2 backend on Windows), shutil.disk_usage()
             # on bind-mounted paths can return the Docker VM's overlay stats
-            # instead of the actual host drive stats, falsely reporting 0 free.
-            # Detect this by attempting a small write: if it succeeds the disk
-            # is NOT genuinely full and we should find a better reading.
+            # instead of the actual host drive stats.  This can manifest as:
+            #   (a) free == 0 while the disk is actually fine, OR
+            #   (b) fs_total is unreasonably small (e.g. a few MB instead of
+            #       several GB) because the overlay metadata size is reported
+            #       instead of the real host volume size.
+            # Detect either case by attempting a small write: if it succeeds
+            # the disk is NOT genuinely full and we should find a better reading.
             _fs_unreliable = False
-            if free == 0:
+            _MIN_EXPECTED_TOTAL = 500 * 1024 * 1024  # 500 MB – any real drive is larger
+            if free == 0 or fs_total < _MIN_EXPECTED_TOTAL:
                 _probe = Path(self.work_dir) / ".disk_probe"
                 try:
                     _probe.write_bytes(b"probe")
@@ -7353,7 +7358,9 @@ class EditorHandler(BaseHTTPRequestHandler):
                     for alt_mount in ["/img", "/overflow"]:
                         try:
                             alt = shutil.disk_usage(alt_mount)
-                            if alt.free > free:
+                            if alt.total >= _MIN_EXPECTED_TOTAL and (
+                                alt.free > free or alt.total > fs_total
+                            ):
                                 free = alt.free
                                 fs_total = alt.total
                                 fs_used = alt.used
@@ -7361,9 +7368,9 @@ class EditorHandler(BaseHTTPRequestHandler):
                                 break
                         except OSError:
                             pass
-                    # If still 0, set a nominal floor so the UI does not
-                    # show a false CRITICAL warning.
-                    if free == 0:
+                    # If still unreasonable, set a nominal floor so the
+                    # UI does not show a false CRITICAL warning.
+                    if free == 0 or fs_total < _MIN_EXPECTED_TOTAL:
                         free = 10 * 1024 * 1024 * 1024    # 10 GB nominal
                         fs_total = fs_used + free
                 except OSError:
@@ -8136,13 +8143,23 @@ class EditorHandler(BaseHTTPRequestHandler):
         Prefers data directories (/work, /img) over root (/) so that the
         small container overlay does not trigger unnecessary auto-cleanup
         when the actual data volumes have plenty of space.
+
+        Skips mounts whose total size is below 500 MB – these are almost
+        certainly Docker Desktop (WSL2) overlay artefacts rather than real
+        host volumes, and would falsely report 97-100 % usage.
         """
+        _MIN_EXPECTED_TOTAL = 500 * 1024 * 1024  # 500 MB
         data_pct = 0.0
         has_data_mount = False
         root_pct = 0.0
         for mount in ["/", str(self.work_dir), "/img"]:
             try:
                 u = shutil.disk_usage(mount)
+                # Ignore mounts reporting an unreasonably small total –
+                # Docker Desktop bind-mounts can return the overlay
+                # metadata size instead of the real host drive size.
+                if u.total < _MIN_EXPECTED_TOTAL:
+                    continue
                 pct = u.used / u.total * 100 if u.total else 0
                 if mount == "/":
                     root_pct = pct
