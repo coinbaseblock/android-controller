@@ -5681,7 +5681,6 @@ async function loadData() {
 
 function render(data) {
   const stations = data.stations || [];
-  const { complete, total } = getCompleteRoundCount(data);
   const summaryEl = document.getElementById('summaryArea');
   const mainEl = document.getElementById('mainArea');
 
@@ -6031,7 +6030,6 @@ function exportHTML() {
 }
 
 document.getElementById('autoRefresh').checked = true;
-toggleAutoRefresh();
 loadData();
 // Auto-refresh is ON by default — start the timer immediately
 toggleAutoRefresh();
@@ -6056,6 +6054,11 @@ class EditorHandler(BaseHTTPRequestHandler):
     _station_logs_cache: dict | None = None
     _station_logs_cache_ts: float = 0.0
     _STATION_LOGS_CACHE_TTL: float = 3.0  # seconds
+    # Cache Docker Desktop unreliable-FS detection across requests.
+    # Once detected as unreliable (probe write succeeds when free==0),
+    # keep the flag True for the session so it doesn't flip-flop when
+    # the overlay fills up and the probe starts failing.
+    _fs_unreliable_cached: bool = False
 
     def log_message(self, format: str, *args: Any) -> None:
         pass
@@ -7393,17 +7396,34 @@ class EditorHandler(BaseHTTPRequestHandler):
             #       instead of the real host volume size.
             # Detect either case by attempting a small write: if it succeeds
             # the disk is NOT genuinely full and we should find a better reading.
-            _fs_unreliable = False
+            #
+            # IMPORTANT: Once detected as unreliable, cache the result as a
+            # class variable.  The Docker overlay can fill up mid-session
+            # causing the probe write to fail on subsequent checks, which
+            # would flip _fs_unreliable back to False and trigger a false
+            # CRITICAL warning.  The cached flag prevents this flip-flop.
+            _fs_unreliable = EditorHandler._fs_unreliable_cached
             _MIN_EXPECTED_TOTAL = 500 * 1024 * 1024  # 500 MB – any real drive is larger
             if free == 0 or fs_total < _MIN_EXPECTED_TOTAL:
-                _probe = Path(self.work_dir) / ".disk_probe"
-                try:
-                    _probe.write_bytes(b"probe")
-                    _probe.unlink(missing_ok=True)
-                    # Write succeeded – filesystem is NOT really full.
-                    _fs_unreliable = True
+                if _fs_unreliable:
+                    # Already known to be Docker Desktop with unreliable stats.
+                    # Skip the probe write (it may fail if overlay is now full)
+                    # and go straight to finding better readings.
+                    pass
+                else:
+                    _probe = Path(self.work_dir) / ".disk_probe"
+                    try:
+                        _probe.write_bytes(b"probe")
+                        _probe.unlink(missing_ok=True)
+                        # Write succeeded – filesystem is NOT really full.
+                        _fs_unreliable = True
+                        EditorHandler._fs_unreliable_cached = True
+                    except OSError:
+                        pass  # Disk is genuinely full
+
+                if _fs_unreliable:
                     # Try alternate mounts for a better free-space reading.
-                    for alt_mount in ["/img", "/overflow"]:
+                    for alt_mount in ["/img", "/overflow", "/tmp"]:
                         try:
                             alt = shutil.disk_usage(alt_mount)
                             if alt.total >= _MIN_EXPECTED_TOTAL and (
@@ -7421,8 +7441,6 @@ class EditorHandler(BaseHTTPRequestHandler):
                     if free == 0 or fs_total < _MIN_EXPECTED_TOTAL:
                         free = 10 * 1024 * 1024 * 1024    # 10 GB nominal
                         fs_total = fs_used + free
-                except OSError:
-                    pass  # Disk is genuinely full
 
             img_dir = Path("/img")
 
