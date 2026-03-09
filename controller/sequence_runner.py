@@ -303,17 +303,23 @@ class SequenceRunner:
         On Docker Desktop (WSL2 backend on Windows), shutil.disk_usage() on
         bind-mounted paths can return the Docker VM overlay stats instead of
         the actual host drive stats — showing 97-98% full when the host has
-        hundreds of GB free.  We detect this by probing a small write: if it
-        succeeds, try alternate mounts for a more accurate reading.
+        hundreds of GB free.
+
+        Detection strategy:
+          1. Proactive: check /.dockerenv (always present in Docker)
+          2. Reactive: if best reading >= 90%, probe-write to verify
+        When Docker is detected, pick the mount with the largest total
+        (usually "/" which reports the VHDX size).
         """
         _MIN_EXPECTED_TOTAL = 500 * 1024 * 1024  # 500 MB
+        _in_docker = Path("/.dockerenv").exists()
 
         best_pct = 0.0
         best_total = 0
         best_free = 0
         best_mount = ""
 
-        for mount in ["/work", "/img", "/"]:
+        for mount in ["/work", "/img", "/", "/overflow", "/tmp"]:
             try:
                 u = shutil.disk_usage(mount)
                 if u.total >= _MIN_EXPECTED_TOTAL and u.total > best_total:
@@ -324,32 +330,29 @@ class SequenceRunner:
             except OSError:
                 pass
 
-        reliable = True
+        reliable = not _in_docker
 
-        # If the "best" reading still looks suspiciously full (>=90%), probe
-        # whether we can actually write — Docker Desktop often lies.
-        if best_pct >= 90:
+        if _in_docker:
+            # In Docker Desktop, the largest mount is the most accurate.
+            # If it still shows >= 90%, it's likely a false reading.
+            if best_pct >= 90:
+                probe = Path("/work/.disk_probe_seq")
+                try:
+                    probe.write_bytes(b"probe")
+                    probe.unlink(missing_ok=True)
+                    best_pct = 50.0  # nominal — disk is actually fine
+                except OSError:
+                    pass  # Genuinely full
+        elif best_pct >= 90:
+            # Not known Docker — probe to detect
             probe = Path("/work/.disk_probe_seq")
             try:
                 probe.write_bytes(b"probe")
                 probe.unlink(missing_ok=True)
                 reliable = False
                 # Write succeeded — disk is NOT genuinely full.
-                # Try to find a mount with realistic stats.
-                for alt in ["/img", "/overflow", "/tmp"]:
-                    try:
-                        au = shutil.disk_usage(alt)
-                        if au.total >= _MIN_EXPECTED_TOTAL:
-                            alt_pct = au.used / au.total * 100 if au.total else 0
-                            if au.total > best_total:
-                                best_pct = alt_pct
-                                best_total = au.total
-                                best_free = au.free
-                                best_mount = alt
-                    except OSError:
-                        pass
-                # If still looks full after probing all mounts, report a safe
-                # nominal value since we proved we CAN write.
+                # Already picked the largest mount above, but if all mounts
+                # are overlay artefacts, use a nominal value.
                 if best_pct >= 90:
                     best_pct = 50.0  # nominal — disk is actually fine
             except OSError:
