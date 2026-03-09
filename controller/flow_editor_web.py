@@ -5668,14 +5668,22 @@ function fmtTimeRange(tsStart, tsEnd) {
 
 async function loadData() {
   try {
-    const res = await fetch('/api/charger-data');
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 15000);
+    const res = await fetch('/api/charger-data', { signal: controller.signal });
+    clearTimeout(timeout);
     const data = await res.json();
+    if (data.error) {
+      document.getElementById('mainArea').innerHTML = '<div class="empty-state"><div class="icon">⚠️</div><p>Server error: ' + data.error + '</p></div>';
+      return;
+    }
     lastData = data;
     render(data);
     updateExportButton(data);
     document.getElementById('lastUpdate').textContent = 'Updated: ' + new Date().toLocaleTimeString('en-GB', { timeZone: 'Asia/Bangkok', hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false });
   } catch(e) {
-    document.getElementById('mainArea').innerHTML = '<div class="empty-state"><div class="icon">⚠️</div><p>Error loading data: ' + e.message + '</p></div>';
+    const msg = e.name === 'AbortError' ? 'Request timed out (15s). Server may be busy parsing logs.' : e.message;
+    document.getElementById('mainArea').innerHTML = '<div class="empty-state"><div class="icon">⚠️</div><p>Error loading data: ' + msg + '</p><p style="font-size:12px;margin-top:8px;color:#6e7681">Click Refresh to try again.</p></div>';
   }
 }
 
@@ -5699,14 +5707,17 @@ function render(data) {
   // ---- Determine "complete rounds" = loops where ALL stations have data ----
   const { complete, total } = getCompleteRoundCount(data);
 
-  // Collect all loop numbers that are complete (every station has it)
+  // Collect all loop numbers present across all stations
   const stationLoopSets = stations.map(s => {
     const loops = new Set();
     (s.rounds || []).forEach(r => loops.add(r.loop));
     return loops;
   });
   const completeLoops = new Set();
+  // Collect ALL loops that exist (for display), mark which are complete
+  const allLoops = new Set();
   for (let l = 1; l <= total; l++) {
+    allLoops.add(l);
     if (stationLoopSets.every(loops => loops.has(l))) {
       completeLoops.add(l);
     }
@@ -5741,32 +5752,23 @@ function render(data) {
       ${progressHtml}
     </div>`;
 
-  // If no complete rounds yet, show waiting message
-  if (completeLoops.size === 0) {
-    mainEl.innerHTML = '<div class="empty-state"><div class="icon">⏳</div><p>รอให้ครบ ' + stations.length + ' สถานี ก่อนแสดงผล…</p><p style="font-size:12px;margin-top:8px;color:#6e7681">เก็บแล้ว ' + inProgressCount + '/' + stations.length + ' สถานี (รอบ ' + inProgressLoop + ')</p></div>';
-    return;
-  }
-
-  // Build station cards — only show COMPLETE rounds
+  // Show ALL available rounds (not just complete ones) so data appears
+  // on first render as soon as any station has been captured.
   let html = '';
   for (const station of stations) {
-    const rounds = (station.rounds || []).filter(r => r.loop >= 1 && r.loop <= complete);
+    const rounds = (station.rounds || []);
     if (!rounds.length) continue;
 
-    // Filter to complete rounds only
-    const completeRounds = rounds.filter(r => completeLoops.has(r.loop));
-    if (!completeRounds.length) continue;
-
-    // Deduplicate by loop
+    // Deduplicate by loop — show all available rounds
     const seenLoop = new Set();
-    const uniqueRounds = completeRounds.filter(r => {
+    const uniqueRounds = rounds.filter(r => {
       const key = r.loop || r.timestamp;
       if (seenLoop.has(key)) return false;
       seenLoop.add(key);
       return true;
     });
 
-    // Collect all unique charger+connector keys from complete rounds
+    // Collect all unique charger+connector keys from available rounds
     const connectorKeys = [];
     const connectorMap = {};
     for (const round of uniqueRounds) {
@@ -5788,13 +5790,18 @@ function render(data) {
     }
 
     // Round columns
-    const roundCols = uniqueRounds.map((r, i) => `
+    const roundCols = uniqueRounds.map((r, i) => {
+      const loopNum = r.loop || (i+1);
+      const isComplete = completeLoops.has(loopNum);
+      const badge = isComplete ? '' : ' <span style="color:#d29922;font-size:10px">●</span>';
+      return `
       <th class="round-col">
-        <div class="round-header">รอบ ${r.loop || (i+1)}</div>
+        <div class="round-header">รอบ ${loopNum}${badge}</div>
         <div class="round-time">${fmtTimeRange(r.timestamp, r.timestamp_end)}</div>
         <div class="round-time" style="color:#6e7681">${fmtDate(r.timestamp)}</div>
         <div class="round-time" style="color:#484f58">${r.connectors.length} หัวจ่าย</div>
-      </th>`).join('');
+      </th>`;
+    }).join('');
 
     // Build round status lookups
     const roundLookup = uniqueRounds.map(r => {
@@ -6100,7 +6107,10 @@ class EditorHandler(BaseHTTPRequestHandler):
         elif path == "/charger-view":
             self._html(CHARGER_VIEW_HTML)
         elif path == "/api/charger-data":
-            self._json(self._charger_data())
+            try:
+                self._json(self._charger_data())
+            except Exception as exc:
+                self._json({"stations": [], "error": str(exc)})
         elif path == "/api/station-logs":
             self._json(self._list_station_logs())
         elif path == "/api/station-log":
