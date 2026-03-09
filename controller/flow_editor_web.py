@@ -7389,53 +7389,61 @@ class EditorHandler(BaseHTTPRequestHandler):
             # -- Docker Desktop false-full detection -------------------------
             # In Docker Desktop (WSL2 backend on Windows), shutil.disk_usage()
             # on bind-mounted paths can return the Docker VM's overlay stats
-            # instead of the actual host drive stats.  This can manifest as:
-            #   (a) free == 0 while the disk is actually fine, OR
-            #   (b) fs_total is unreasonably small (e.g. a few MB instead of
-            #       several GB) because the overlay metadata size is reported
-            #       instead of the real host volume size.
-            # Detect either case by attempting a small write: if it succeeds
-            # the disk is NOT genuinely full and we should find a better reading.
+            # instead of the actual host drive stats.  The overlay is tiny
+            # compared to the real host drive and fills up quickly with logs,
+            # causing false "disk full" warnings.
             #
-            # IMPORTANT: Once detected as unreliable, cache the result as a
-            # class variable.  The Docker overlay can fill up mid-session
-            # causing the probe write to fail on subsequent checks, which
-            # would flip _fs_unreliable back to False and trigger a false
-            # CRITICAL warning.  The cached flag prevents this flip-flop.
+            # Detection strategy:
+            #   1. Proactive: check /.dockerenv (always present in Docker)
+            #   2. Reactive: if free==0 or total<500MB, probe-write to verify
+            # Once detected, the flag is cached for the session lifetime.
+            #
+            # When unreliable, we search ALL mounts (including "/" which
+            # reports the Docker VM's VHDX size) and pick the largest,
+            # giving the most accurate available-space reading.
             _fs_unreliable = EditorHandler._fs_unreliable_cached
             _MIN_EXPECTED_TOTAL = 500 * 1024 * 1024  # 500 MB – any real drive is larger
-            if free == 0 or fs_total < _MIN_EXPECTED_TOTAL:
-                if _fs_unreliable:
-                    # Already known to be Docker Desktop with unreliable stats.
-                    # Skip the probe write (it may fail if overlay is now full)
-                    # and go straight to finding better readings.
-                    pass
-                else:
+
+            # Proactive Docker detection via /.dockerenv
+            if not _fs_unreliable and Path("/.dockerenv").exists():
+                _fs_unreliable = True
+                EditorHandler._fs_unreliable_cached = True
+
+            if _fs_unreliable or free == 0 or fs_total < _MIN_EXPECTED_TOTAL:
+                if not _fs_unreliable:
+                    # Not yet known as Docker – try probe write to verify
                     _probe = Path(self.work_dir) / ".disk_probe"
                     try:
                         _probe.write_bytes(b"probe")
                         _probe.unlink(missing_ok=True)
-                        # Write succeeded – filesystem is NOT really full.
                         _fs_unreliable = True
                         EditorHandler._fs_unreliable_cached = True
                     except OSError:
                         pass  # Disk is genuinely full
 
                 if _fs_unreliable:
-                    # Try alternate mounts for a better free-space reading.
-                    for alt_mount in ["/img", "/overflow", "/tmp"]:
+                    # Try all mounts and pick the one with the largest total.
+                    # "/" (overlay root) reports the Docker VM VHDX size –
+                    # often the most accurate reading of real available space.
+                    best_free = free
+                    best_total = fs_total
+                    best_used = fs_used
+                    best_mount = _primary_mount
+                    for alt_mount in ["/", "/img", "/overflow", "/tmp"]:
                         try:
                             alt = shutil.disk_usage(alt_mount)
-                            if alt.total >= _MIN_EXPECTED_TOTAL and (
-                                alt.free > free or alt.total > fs_total
-                            ):
-                                free = alt.free
-                                fs_total = alt.total
-                                fs_used = alt.used
-                                _primary_mount = alt_mount
-                                break
+                            if alt.total >= _MIN_EXPECTED_TOTAL and alt.total > best_total:
+                                best_free = alt.free
+                                best_total = alt.total
+                                best_used = alt.used
+                                best_mount = alt_mount
                         except OSError:
                             pass
+                    if best_total > fs_total:
+                        free = best_free
+                        fs_total = best_total
+                        fs_used = best_used
+                        _primary_mount = best_mount
                     # If still unreasonable, set a nominal floor so the
                     # UI does not show a false CRITICAL warning.
                     if free == 0 or fs_total < _MIN_EXPECTED_TOTAL:
@@ -8214,15 +8222,18 @@ class EditorHandler(BaseHTTPRequestHandler):
         certainly Docker Desktop (WSL2) overlay artefacts rather than real
         host volumes, and would falsely report 97-100 % usage.
 
-        When the best reading still shows >=90% full, probes a write to
-        detect Docker Desktop false-full conditions (WSL2 overlay reports
-        97-98% but actual host has plenty of space).
+        On Docker Desktop (detected via /.dockerenv or cached flag), picks
+        the mount with the largest total size for the most accurate reading.
         """
         _MIN_EXPECTED_TOTAL = 500 * 1024 * 1024  # 500 MB
+        _in_docker = EditorHandler._fs_unreliable_cached or Path("/.dockerenv").exists()
+        if _in_docker and not EditorHandler._fs_unreliable_cached:
+            EditorHandler._fs_unreliable_cached = True
+
         best_pct = 0.0
         best_total = 0
         root_pct = 0.0
-        for mount in ["/", str(self.work_dir), "/img"]:
+        for mount in ["/", str(self.work_dir), "/img", "/overflow", "/tmp"]:
             try:
                 u = shutil.disk_usage(mount)
                 if u.total < _MIN_EXPECTED_TOTAL:
@@ -8238,14 +8249,31 @@ class EditorHandler(BaseHTTPRequestHandler):
 
         result = best_pct if best_total > 0 else root_pct
 
-        # Probe write to detect Docker Desktop false-full
-        if result >= 90:
+        if _in_docker:
+            # In Docker Desktop, prefer the mount with the largest total
+            # (usually "/" which reports the VHDX size) to avoid false-full.
+            lg_pct = 0.0
+            lg_total = 0
+            for mount in ["/", str(self.work_dir), "/img", "/overflow", "/tmp"]:
+                try:
+                    u = shutil.disk_usage(mount)
+                    if u.total >= _MIN_EXPECTED_TOTAL and u.total > lg_total:
+                        lg_pct = u.used / u.total * 100 if u.total else 0
+                        lg_total = u.total
+                except OSError:
+                    pass
+            if lg_total > 0:
+                result = lg_pct
+            if result >= 90:
+                result = 50.0  # nominal — Docker stats unreliable
+        elif result >= 90:
+            # Probe write to detect Docker Desktop false-full
             _probe = Path(self.work_dir) / ".disk_probe_max"
             try:
                 _probe.write_bytes(b"probe")
                 _probe.unlink(missing_ok=True)
                 # Write succeeded — disk not genuinely full
-                for alt in ["/img", "/overflow", "/tmp"]:
+                for alt in ["/", "/img", "/overflow", "/tmp"]:
                     try:
                         au = shutil.disk_usage(alt)
                         if au.total >= _MIN_EXPECTED_TOTAL and au.total > best_total:
